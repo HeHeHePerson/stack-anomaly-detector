@@ -12,10 +12,31 @@ import java.lang.instrument.Instrumentation;
 public class AgentMain {
 
     private static final String[] TARGET_CLASSES = {
-        "java.nio.channels.FileChannel",
+        // Servlet - Web 请求入口 (动态加载，可 Hook)
         "javax.servlet.ServletContext",
-        "javax.servlet.http.HttpServlet"
+        "javax.servlet.http.HttpServlet",
+        // NIO 文件操作 (可选 Hook，SecurityManager 已覆盖)
+        "java.nio.file.Files",
+        // 文件描述符 (动态加载时 Hook)
+        "java.io.FileDescriptor"
     };
+
+    /**
+     * 安装 RASP 安全管理器
+     * 通过 JDK 标准接口拦截所有文件 I/O，替代无效的 Bootstrap 类 Hook
+     */
+    private static void installSecurityManager() {
+        try {
+            java.lang.SecurityManager current = System.getSecurityManager();
+            com.defense.rasp.stackmodel.RaspSecurityManager raspSM = 
+                    new com.defense.rasp.stackmodel.RaspSecurityManager(current);
+            System.setSecurityManager(raspSM);
+            System.out.println("[StackAnomalyDetector] RASP SecurityManager 已安装" + 
+                    (current != null ? " (连接父级管理器)" : " (替换默认管理器)"));
+        } catch (SecurityException e) {
+            System.out.println("[StackAnomalyDetector] SecurityManager 安装失败 (权限受限): " + e.getMessage());
+        }
+    }
 
     /**
      * Agent入口方法
@@ -23,9 +44,17 @@ public class AgentMain {
      * @param inst Instrumentation实例
      */
     public static void premain(String agentArgs, Instrumentation inst) {
+        AgentConfig.parseArgs(agentArgs);
+        
         System.out.println("[StackAnomalyDetector] Agent initialized with args: " + (agentArgs != null ? agentArgs : "none"));
         
         try {
+            // Initialize Learning Engine first
+            initializeLearningEngine();
+            
+            // Install RASP SecurityManager (替代无效的 Bootstrap 类 Hook)
+            installSecurityManager();
+            
             TemporalStackTransformer transformer = new TemporalStackTransformer();
             
             inst.addTransformer(transformer, true);
@@ -34,8 +63,6 @@ public class AgentMain {
             System.out.println("[StackAnomalyDetector] redefineClasses支持: " + inst.isRedefineClassesSupported());
             System.out.println("[StackAnomalyDetector] retransformClasses支持: " + inst.isRetransformClassesSupported());
             System.out.println("[StackAnomalyDetector] nativeMethodPrefix支持: " + inst.isNativeMethodPrefixSupported());
-            
-            initializeLearningEngine();
             
             if (inst.isRetransformClassesSupported()) {
                 processLoadedClasses(inst, transformer);
@@ -56,8 +83,10 @@ public class AgentMain {
 
     private static void initializeLearningEngine() {
         try {
+            com.defense.rasp.stackmodel.BaselineLearningEngine.setLearningDuration(
+                    AgentConfig.getLearningDurationMs());
             Class.forName("com.defense.rasp.stackmodel.BaselineLearningEngine");
-            System.out.println("[StackAnomalyDetector] 学习引擎初始化完成");
+            System.out.println("[StackAnomalyDetector] 学习引擎初始化完成，学习时长: " + AgentConfig.getLearningDurationMs() + "ms");
         } catch (ClassNotFoundException e) {
             System.err.println("[StackAnomalyDetector] 学习引擎初始化失败: " + e.getMessage());
         } catch (Exception e) {
@@ -206,9 +235,17 @@ public class AgentMain {
      * agentmain 方法 - 支持运行时附加到正在运行的 JVM
      */
     public static void agentmain(String agentArgs, Instrumentation inst) {
+        AgentConfig.parseArgs(agentArgs);
+        
         System.out.println("[StackAnomalyDetector] Agent attached at runtime with args: " + (agentArgs != null ? agentArgs : "none"));
         
         try {
+            // Initialize Learning Engine first
+            initializeLearningEngine();
+            
+            // Install RASP SecurityManager
+            installSecurityManager();
+            
             TemporalStackTransformer transformer = new TemporalStackTransformer();
             
             inst.addTransformer(transformer, true);

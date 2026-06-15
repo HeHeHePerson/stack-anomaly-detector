@@ -1,0 +1,73 @@
+基于对 Behinder.jar 的反编译分析，我已经识别出文件管理功能的核心实现代码。以下是完整的分析结果：
+
+文件管理功能架构
+Behinder 的文件管理功能采用分层架构，主要分为三个层次：
+
+1. UI层 - 文件管理器视图控制器
+文件: net/rebeyond/behinder/ui/controller/FileManagerViewController.class
+
+核心功能:
+
+目录树展示 (initDirTree)
+文件列表展示 (initFileListTableColumns)
+文件上传 (uploadFile)
+文件下载 (downloadFile)
+文件内容查看与编辑 (showFile, saveFileContent)
+创建目录 (createDirectory)
+文件重命名 (rename)
+时间戳修改 (doChangeTimeStamp)
+2. 服务层 - 文件服务
+文件: net/rebeyond/behinder/service/FileService.class
+
+核心功能:
+
+多线程上传 (uploadFile) - 支持分块传输
+多线程下载 (downloadFile) - 支持断点续传
+关键常量:
+
+UPLOAD_BLOCK_SIZE - 上传块大小
+DOWNLOAD_BLOCK_SIZE - 下载块大小
+THREAD_NUM - 并发线程数
+3. Payload层 - 文件操作执行器
+文件: net/rebeyond/behinder/payload/java/FileOperation.class
+
+这是在目标服务器上执行的文件操作代码，包含：
+
+方法	功能描述
+list()	列出目录内容
+show()	查看文件内容
+create()	创建文件
+createFile()	创建空文件
+createDirectory()	创建目录
+renameFile()	重命名文件/目录
+delete()	删除文件/目录
+download()	下载文件
+downloadPart()	分块下载
+updateFile()	更新文件内容
+append()	追加内容到文件
+zipFile()	压缩文件/目录
+checkFileHash()	校验文件哈希
+4. 实体类
+文件: net/rebeyond/behinder/entity/File.class
+
+用于封装文件信息的数据模型。
+
+执行流程
+
+Plain Text
+
+用户操作 (UI) → FileManagerViewController → FileService → Shell通信 → FileOperation (目标服务器)
+完整流程说明:
+
+用户在 FileManagerViewController 发起文件操作请求
+FileService 负责构建请求、处理网络通信和多线程管理
+请求通过加密信道发送到目标服务器上的 FileOperation payload
+FileOperation 执行实际的文件系统操作（list/read/write/delete等）
+结果返回给客户端显示
+关键技术特点
+分块传输: 文件上传/下载采用分块方式，支持大文件传输
+多线程并发: 通过多线程提升传输效率
+跨平台支持: isWindows() 和 isOldJava() 方法处理平台差异
+文件哈希校验: checkFileHash() 确保传输完整性
+时间戳伪造: updateTimeStamp() 可修改文件时间属性
+这些文件构成了 Behinder 完整的文件管理功能实现，涵盖了从UI交互到服务器端执行的完整链路。
