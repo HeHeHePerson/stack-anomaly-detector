@@ -19,7 +19,45 @@ public class TemporalGuard {
     private static final int MEDIUM_RISK_THRESHOLD = 20;
 
     /**
-     * 文件读取检测入口（由ASM Hook调用）
+     * 目录列举检测入口（由 ASM Hook 调用）
+     * 拦截 File.list() 调用，检测冰蝎文件管理探测敏感目录的行为
+     */
+    public static void onFileList(java.io.File dir) {
+        if (dir == null) return;
+        String dirPath = dir.getAbsolutePath();
+        
+        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+        
+        AlertLogger.info("[TemporalGuard] 目录列举检测触发: " + dirPath);
+        AlertLogger.info("[TemporalGuard] 调用栈深度: " + stack.length);
+        
+        recordThreadEvent("java.io.FileSystem.list",
+                StackTemporalEngine.CallEvent.EventType.ENTER);
+        
+        long jvmUptime = System.currentTimeMillis() - BaselineLearningEngine.LEARNING_START_TIME;
+        boolean isStartup = jvmUptime < 120_000;
+        
+        AlertLogger.info("[TemporalGuard] 学习期状态: " + (BaselineLearningEngine.isLearningPhase() ? "学习中" : "检测中"));
+        AlertLogger.info("[TemporalGuard] 启动期状态: " + (isStartup ? "是" : "否"));
+        
+        BaselineLearningEngine.learnNormalStack(stack, isStartup);
+        int anomalyScore = BaselineLearningEngine.detectAnomaly(stack, dirPath);
+        
+        // 检测是否为敏感目录
+        if (isSensitiveDirectory(dirPath)) {
+            anomalyScore += 30;
+            AlertLogger.alarm("[SensitiveDir] 检测到敏感目录列举: " + dirPath);
+        }
+        
+        if (anomalyScore >= HIGH_RISK_THRESHOLD) {
+            block("高风险目录列举: 分数=" + anomalyScore + ", 目录=" + dirPath, stack);
+        } else if (anomalyScore >= MEDIUM_RISK_THRESHOLD) {
+            alarm("中风险目录列举: 分数=" + anomalyScore + ", 目录=" + dirPath, stack);
+        }
+    }
+
+    /**
+     * 文件读取检测入口（由 ASM Hook 调用）
      */
     public static void onFileRead(String filePath) {
         if (filePath == null) return;
@@ -492,6 +530,95 @@ public class TemporalGuard {
         for (String keyword : sensitiveKeywords) {
             if (lowerPath.contains(keyword)) {
                 AlarmWithDetail("[SensitiveFile] 检测到敏感关键词文件：" + filePath);
+                return true;
+            }
+        }
+        
+        return false;
+    }
+
+    /**
+     * 判断是否为敏感目录
+     * 用于检测目录列举行为（如冰蝎文件管理探测 Tomcat conf 目录）
+     */
+    private static boolean isSensitiveDirectory(String dirPath) {
+        if (dirPath == null) return false;
+        String lowerPath = dirPath.toLowerCase();
+        
+        // Web 容器敏感目录
+        String[] sensitiveDirs = {
+            "tomcat/conf",
+            "tomcat\\conf",
+            "tomcat/webapps",
+            "tomcat\\webapps",
+            "tomcat/logs",
+            "tomcat\\logs",
+            "catalina/conf",
+            "catalina\\conf",
+            "catalina_base/conf",
+            "catalina_base\\conf",
+            "webapps/web-inf",
+            "webapps\\web-inf",
+            "webapps/meta-inf",
+            "webapps\\meta-inf"
+        };
+        
+        // 系统敏感目录 (Linux/Windows)
+        String[] systemDirs = {
+            "/etc/",
+            "/etc\\",
+            "etc/",
+            "etc\\",
+            "windows/system32",
+            "windows\\system32",
+            "windows/winnt",
+            "windows\\winnt",
+            "programdata/",
+            "programdata\\",
+            "users/all users",
+            "users\\all users",
+            "users/default",
+            "users\\default",
+            ".ssh/",
+            ".ssh\\",
+            ".git/",
+            ".git\\",
+            "svn/",
+            "svn\\",
+            ".svn/",
+            ".svn\\"
+        };
+        
+        // 应用敏感目录
+        String[] appDirs = {
+            "classpath/",
+            "classpath\\",
+            "config/",
+            "config\\",
+            "configuration/",
+            "configuration\\",
+            "secrets/",
+            "secrets\\",
+            "keys/",
+            "keys\\",
+            "credentials/",
+            "credentials\\"
+        };
+        
+        for (String dir : sensitiveDirs) {
+            if (lowerPath.contains(dir)) {
+                return true;
+            }
+        }
+        
+        for (String dir : systemDirs) {
+            if (lowerPath.contains(dir)) {
+                return true;
+            }
+        }
+        
+        for (String dir : appDirs) {
+            if (lowerPath.contains(dir)) {
                 return true;
             }
         }

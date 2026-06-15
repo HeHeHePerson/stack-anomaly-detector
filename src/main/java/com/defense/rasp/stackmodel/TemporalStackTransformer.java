@@ -70,6 +70,17 @@ public class TemporalStackTransformer implements ClassFileTransformer {
             return hookFile(classfileBuffer);
         }
 
+        // 新增：拦截目录列举 - 冰蝎文件管理核心 API
+        if ("java/io/UnixFileSystem".equals(className)) {
+            AlertLogger.info("[TemporalStackTransformer] 插桩 UnixFileSystem");
+            return hookUnixFileSystem(classfileBuffer);
+        }
+
+        if ("java/io/Win32FileSystem".equals(className)) {
+            AlertLogger.info("[TemporalStackTransformer] 插桩 Win32FileSystem");
+            return hookWin32FileSystem(classfileBuffer);
+        }
+
         return null;
     }
 
@@ -620,6 +631,74 @@ public class TemporalStackTransformer implements ClassFileTransformer {
                     };
                 }
                 
+                return mv;
+            }
+        };
+        cr.accept(cv, 0);
+        return cw.toByteArray();
+    }
+
+    /**
+     *  Hook java.io.UnixFileSystem - 拦截 Linux 下的目录列举
+     *  冰蝎文件管理通过 File.list() -> FileSystem.list() 获取目录内容
+     */
+    private byte[] hookUnixFileSystem(byte[] classfileBuffer) {
+        ClassReader cr = new ClassReader(classfileBuffer);
+        ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
+        ClassVisitor cv = new ClassVisitor(Opcodes.ASM9, cw) {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String descriptor,
+                                             String signature, String[] exceptions) {
+                MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                
+                // Hook list(File f) - 返回目录字符串数组
+                if ("list".equals(name) && "(Ljava/io/File;)[Ljava/lang/String;".equals(descriptor)) {
+                    return new MethodVisitor(Opcodes.ASM9, mv) {
+                        @Override
+                        public void visitCode() {
+                            super.visitCode();
+                            mv.visitVarInsn(Opcodes.ALOAD, 1);
+                            mv.visitMethodInsn(Opcodes.INVOKESTATIC,
+                                "com/defense/rasp/stackmodel/TemporalGuard",
+                                "onFileList",
+                                "(Ljava/io/File;)V",
+                                false);
+                        }
+                    };
+                }
+                return mv;
+            }
+        };
+        cr.accept(cv, 0);
+        return cw.toByteArray();
+    }
+
+    /**
+     * Hook java.io.Win32FileSystem - 拦截 Windows 下的目录列举
+     */
+    private byte[] hookWin32FileSystem(byte[] classfileBuffer) {
+        ClassReader cr = new ClassReader(classfileBuffer);
+        ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
+        ClassVisitor cv = new ClassVisitor(Opcodes.ASM9, cw) {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String descriptor,
+                                             String signature, String[] exceptions) {
+                MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                
+                if ("list".equals(name) && "(Ljava/io/File;)[Ljava/lang/String;".equals(descriptor)) {
+                    return new MethodVisitor(Opcodes.ASM9, mv) {
+                        @Override
+                        public void visitCode() {
+                            super.visitCode();
+                            mv.visitVarInsn(Opcodes.ALOAD, 1);
+                            mv.visitMethodInsn(Opcodes.INVOKESTATIC,
+                                "com/defense/rasp/stackmodel/TemporalGuard",
+                                "onFileList",
+                                "(Ljava/io/File;)V",
+                                false);
+                        }
+                    };
+                }
                 return mv;
             }
         };
