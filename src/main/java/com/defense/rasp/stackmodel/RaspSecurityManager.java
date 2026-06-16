@@ -3,12 +3,19 @@ package com.defense.rasp.stackmodel;
 import java.security.Permission;
 
 /**
- * RASP 安全管理器 - 拦截文件 I/O、命令执行、文件删除
+ * RASP 安全管理器 - 拦截文件 I/O、命令执行
  * 核心原则：检测逻辑异常绝不能阻断正常业务流
+ * 使用 ThreadLocal 防止 AlertLogger 写日志触发递归 StackOverflow
  */
 public class RaspSecurityManager extends java.lang.SecurityManager {
 
     private final java.lang.SecurityManager parent;
+    
+    /**
+     * 防重入标志 - 检测逻辑内部写日志时会再次触发 checkWrite/checkRead，
+     * 通过此标记跳过二次检测，避免 StackOverflowError
+     */
+    private static final ThreadLocal<Boolean> IN_DETECTION = ThreadLocal.withInitial(() -> false);
 
     public RaspSecurityManager(java.lang.SecurityManager parent) {
         this.parent = parent;
@@ -17,57 +24,81 @@ public class RaspSecurityManager extends java.lang.SecurityManager {
 
     @Override
     public void checkRead(String file) {
+        if (IN_DETECTION.get()) return;
         try {
+            IN_DETECTION.set(true);
             TemporalGuard.onFileRead(file);
-        } catch (Exception e) {
-            // 检测逻辑异常，静默处理，不阻断业务
+        } catch (Throwable e) {
+            // 检测逻辑异常，静默处理
+        } finally {
+            IN_DETECTION.remove();
         }
     }
 
     @Override
     public void checkRead(String file, Object context) {
-        try {
-            TemporalGuard.onFileRead(file);
-        } catch (Exception e) {
-            // 检测逻辑异常，静默处理
-        }
+        checkRead(file);
     }
 
     @Override
     public void checkWrite(String file) {
+        if (IN_DETECTION.get()) return;
         try {
+            IN_DETECTION.set(true);
             TemporalGuard.onFileWrite(file);
-        } catch (Exception e) {
-            // 检测逻辑异常，静默处理
+        } catch (Throwable e) {
+        } finally {
+            IN_DETECTION.remove();
         }
     }
 
     @Override
     public void checkDelete(String file) {
+        if (IN_DETECTION.get()) return;
         try {
+            IN_DETECTION.set(true);
             TemporalGuard.onFileDelete(file);
-        } catch (Exception e) {
-            // 检测逻辑异常，静默处理
+        } catch (Throwable e) {
+        } finally {
+            IN_DETECTION.remove();
         }
     }
 
     @Override
     public void checkExec(String cmd) {
+        if (IN_DETECTION.get()) return;
         try {
+            IN_DETECTION.set(true);
             TemporalGuard.onCommandExec(cmd);
-        } catch (Exception e) {
-            // 检测逻辑异常，静默处理
+        } catch (Throwable e) {
+        } finally {
+            IN_DETECTION.remove();
         }
+    }
+
+    /**
+     * 放行所有包访问检查，避免干扰 Tomcat WebappClassLoader 类加载
+     * 此方法由 JVM 在类加载时直接调用，不经过 checkPermission
+     */
+    @Override
+    public void checkPackageAccess(String pkg) {
+        // 完全放行 - 包访问安全检查不影响文件/命令检测
+    }
+
+    /**
+     * 放行包定义检查（类加载时 JVM 直接调用）
+     */
+    @Override
+    public void checkPackageDefinition(String pkg) {
+        // 完全放行
     }
 
     @Override
     public void checkPermission(Permission perm) {
         String permName = perm.getClass().getName();
-        // 放行属性权限
         if ("java.util.PropertyPermission".equals(permName)) {
             return;
         }
-        // 放行类加载相关权限
         if ("java.lang.RuntimePermission".equals(permName)) {
             String name = perm.getName();
             if (name.startsWith("accessClassInPackage.") ||
@@ -75,19 +106,29 @@ public class RaspSecurityManager extends java.lang.SecurityManager {
                 name.equals("getProtectionDomain") ||
                 name.equals("getClassLoader") ||
                 name.equals("closeClassLoader") ||
+                name.equals("getStackTrace") ||
+                name.equals("modifyThread") ||
+                name.equals("modifyThreadGroup") ||
                 name.startsWith("accessDeclaredMembers")) {
                 return;
             }
         }
-        // 放行网络连接权限（WebSocket 等需要）
         if ("java.net.NetPermission".equals(permName)) {
             return;
         }
         if ("java.net.SocketPermission".equals(permName)) {
             return;
         }
-        // SSL/TLS 权限
         if ("javax.net.ssl.SSLPermission".equals(permName)) {
+            return;
+        }
+        if ("java.io.FilePermission".equals(permName)) {
+            return;
+        }
+        if ("java.lang.reflect.ReflectPermission".equals(permName)) {
+            return;
+        }
+        if ("java.security.SecurityPermission".equals(permName)) {
             return;
         }
         if (parent != null) {
@@ -106,6 +147,9 @@ public class RaspSecurityManager extends java.lang.SecurityManager {
                 name.equals("getProtectionDomain") ||
                 name.equals("getClassLoader") ||
                 name.equals("closeClassLoader") ||
+                name.equals("getStackTrace") ||
+                name.equals("modifyThread") ||
+                name.equals("modifyThreadGroup") ||
                 name.startsWith("accessDeclaredMembers")) {
                 return;
             }
@@ -113,6 +157,9 @@ public class RaspSecurityManager extends java.lang.SecurityManager {
         if ("java.net.NetPermission".equals(permName)) { return; }
         if ("java.net.SocketPermission".equals(permName)) { return; }
         if ("javax.net.ssl.SSLPermission".equals(permName)) { return; }
+        if ("java.io.FilePermission".equals(permName)) { return; }
+        if ("java.lang.reflect.ReflectPermission".equals(permName)) { return; }
+        if ("java.security.SecurityPermission".equals(permName)) { return; }
         if (parent != null) {
             parent.checkPermission(perm, context);
         }

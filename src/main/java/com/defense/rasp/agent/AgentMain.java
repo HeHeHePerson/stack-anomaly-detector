@@ -12,26 +12,56 @@ import java.lang.instrument.Instrumentation;
 public class AgentMain {
 
     private static final String[] TARGET_CLASSES = {
-        // Servlet - Web 请求入口 (动态加载，可 Hook)
-        "javax.servlet.ServletContext",
+        // Servlet - Web 请求入口 (Tomcat 加载，可安全 Hook)
         "javax.servlet.http.HttpServlet",
-        // NIO 文件操作 (可选 Hook，SecurityManager 已覆盖)
-        "java.nio.file.Files",
-        // 文件描述符 (动态加载时 Hook)
-        "java.io.FileDescriptor"
+        "javax.servlet.ServletContext"
     };
 
     /**
-     * 安装 RASP 安全管理器
-     * 通过 JDK 标准接口拦截所有文件 I/O，替代无效的 Bootstrap 类 Hook
+     * 延迟安装 RASP 安全管理器
+     * SecurityManager 如果在 Tomcat 启动阶段激活，会干扰 webapp 类加载和部署流程
+     * （JDK 8 中 checkPackageAccess/checkRead 调用极高频），导致 /examples 等内置应用 404
+     * 解决方案：延迟 15 秒等待 Tomcat 启动完成后再安装
      */
-    private static void installSecurityManager() {
+    private static void installSecurityManagerDeferred() {
+        Thread smThread = new Thread(() -> {
+            try {
+                // 等待 Tomcat 完全启动（默认 15 秒，可通过系统属性调整）
+                int delay = Integer.parseInt(System.getProperty("rasp.sm.delay", "15"));
+                System.out.println("[StackAnomalyDetector] SecurityManager 将在 " + delay + " 秒后安装（等待 Tomcat 就绪）");
+                Thread.sleep(delay * 1000L);
+                
+                java.lang.SecurityManager current = System.getSecurityManager();
+                com.defense.rasp.stackmodel.RaspSecurityManager raspSM = 
+                        new com.defense.rasp.stackmodel.RaspSecurityManager(current);
+                System.setSecurityManager(raspSM);
+                System.out.println("[StackAnomalyDetector] RASP SecurityManager 已安装" + 
+                        (current != null ? " (连接父级管理器)" : " (替换默认管理器)"));
+            } catch (InterruptedException e) {
+                System.out.println("[StackAnomalyDetector] SecurityManager 延迟安装被中断");
+                Thread.currentThread().interrupt();
+            } catch (SecurityException e) {
+                System.out.println("[StackAnomalyDetector] SecurityManager 安装失败 (权限受限): " + e.getMessage());
+            } catch (Exception e) {
+                System.err.println("[StackAnomalyDetector] SecurityManager 安装异常: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }, "RaspSecurityManager-Installer");
+        smThread.setDaemon(false);
+        smThread.start();
+    }
+
+    /**
+     * 立即安装 SecurityManager（仅在 JVM 参数 rasp.sm.immediate=true 时使用）
+     * 适用于非 Tomcat 环境或已知不会干扰启动的场景
+     */
+    private static void installSecurityManagerImmediate() {
         try {
             java.lang.SecurityManager current = System.getSecurityManager();
             com.defense.rasp.stackmodel.RaspSecurityManager raspSM = 
                     new com.defense.rasp.stackmodel.RaspSecurityManager(current);
             System.setSecurityManager(raspSM);
-            System.out.println("[StackAnomalyDetector] RASP SecurityManager 已安装" + 
+            System.out.println("[StackAnomalyDetector] RASP SecurityManager 已安装(立即)" + 
                     (current != null ? " (连接父级管理器)" : " (替换默认管理器)"));
         } catch (SecurityException e) {
             System.out.println("[StackAnomalyDetector] SecurityManager 安装失败 (权限受限): " + e.getMessage());
@@ -52,8 +82,12 @@ public class AgentMain {
             // Initialize Learning Engine first
             initializeLearningEngine();
             
-            // Install RASP SecurityManager (替代无效的 Bootstrap 类 Hook)
-            installSecurityManager();
+            // 延迟安装 SecurityManager，避免干扰 Tomcat 启动
+            if (Boolean.parseBoolean(System.getProperty("rasp.sm.immediate", "false"))) {
+                installSecurityManagerImmediate();
+            } else {
+                installSecurityManagerDeferred();
+            }
             
             TemporalStackTransformer transformer = new TemporalStackTransformer();
             
@@ -243,8 +277,8 @@ public class AgentMain {
             // Initialize Learning Engine first
             initializeLearningEngine();
             
-            // Install RASP SecurityManager
-            installSecurityManager();
+            // agentmain 是运行时附加，Tomcat 已启动，立即安装 SecurityManager
+            installSecurityManagerImmediate();
             
             TemporalStackTransformer transformer = new TemporalStackTransformer();
             

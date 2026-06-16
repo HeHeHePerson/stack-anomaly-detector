@@ -27,7 +27,13 @@ public class TemporalGuard {
                 className.startsWith("java.lang.Shutdown") ||
                 className.startsWith("java.lang.ApplicationShutdownHooks") ||
                 className.startsWith("sun.launcher.") ||
-                className.startsWith("org.apache.catalina.startup.Bootstrap")) {
+                className.startsWith("org.apache.catalina.startup.") ||
+                className.startsWith("org.apache.catalina.core.") ||
+                className.startsWith("org.apache.catalina.util.") ||
+                className.startsWith("org.apache.tomcat.") ||
+                className.startsWith("org.apache.coyote.") ||
+                className.startsWith("java.util.concurrent.") ||
+                className.startsWith("java.lang.Thread")) {
                 return true;
             }
         }
