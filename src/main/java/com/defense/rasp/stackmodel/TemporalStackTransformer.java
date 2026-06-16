@@ -41,23 +41,9 @@ public class TemporalStackTransformer implements ClassFileTransformer {
             AlertLogger.info("[TemporalStackTransformer] 插桩 FileDescriptor (lowest-level I/O)");
             return hookFileDescriptor(classfileBuffer);
         }
-
-        // 反射与命令执行 (应用层动态加载)
-        if ("java/lang/reflect/Method".equals(className)) {
-            AlertLogger.info("[TemporalStackTransformer] 插桩 Method.invoke");
-            return hookMethodInvoke(classfileBuffer);
-        }
-
-        if ("java/lang/Runtime".equals(className)) {
-            AlertLogger.info("[TemporalStackTransformer] 插桩 Runtime.exec");
-            return hookRuntime(classfileBuffer);
-        }
-
-        if ("java/lang/ProcessBuilder".equals(className)) {
-            AlertLogger.info("[TemporalStackTransformer] 插桩 ProcessBuilder");
-            return hookProcessBuilder(classfileBuffer);
-        }
         
+        // --- 以下 Bootstrap 类已通过 RaspSecurityManager 覆盖，移除 ASM Hook 以避免 JVM 不稳定 ---
+        // java.lang.reflect.Method, Runtime, ProcessBuilder 等均由 SecurityManager 拦截或不需要 Hook
         // --- 以下 Bootstrap 类已通过 RaspSecurityManager 覆盖，无需 ASM Hook ---
         // java.io.FileInputStream, FileReader, RandomAccessFile, File, 
         // UnixFileSystem, Win32FileSystem 均由 SecurityManager 拦截
@@ -242,8 +228,8 @@ public class TemporalStackTransformer implements ClassFileTransformer {
                         @Override
                         public void visitCode() {
                             super.visitCode();
+                            // 直接传递 req 对象为 Object，避免 CHECKCAST 在 SecurityManager 下抛出 ClassCastException
                             mv.visitVarInsn(Opcodes.ALOAD, 1);
-                            mv.visitTypeInsn(Opcodes.CHECKCAST, "javax/servlet/http/HttpServletRequest");
                             mv.visitMethodInsn(Opcodes.INVOKESTATIC,
                                 GUARD_CLASS, "onHttpServlet", "(Ljava/lang/Object;)V", false);
                         }
@@ -290,108 +276,13 @@ public class TemporalStackTransformer implements ClassFileTransformer {
         return cw.toByteArray();
     }
     
-    private byte[] hookMethodInvoke(byte[] classfileBuffer) {
-        ClassReader cr = new ClassReader(classfileBuffer);
-        ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
-        ClassVisitor cv = new ClassVisitor(Opcodes.ASM9, cw) {
-            @Override
-            public MethodVisitor visitMethod(int access, String name, String descriptor,
-                                             String signature, String[] exceptions) {
-                MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
-                
-                if ("invoke".equals(name)) {
-                    return new MethodVisitor(Opcodes.ASM9, mv) {
-                        @Override
-                        public void visitCode() {
-                            super.visitCode();
-                            mv.visitVarInsn(Opcodes.ALOAD, 0);
-                            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/reflect/Method", 
-                                    "getDeclaringClass", "()Ljava/lang/Class;", false);
-                            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Class", 
-                                    "getName", "()Ljava/lang/String;", false);
-                            mv.visitVarInsn(Opcodes.ALOAD, 0);
-                            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/reflect/Method", 
-                                    "getName", "()Ljava/lang/String;", false);
-                            mv.visitInsn(Opcodes.ICONST_2);
-                            mv.visitVarInsn(Opcodes.ASTORE, 5);
-                            mv.visitVarInsn(Opcodes.ALOAD, 5);
-                            mv.visitInsn(Opcodes.ICONST_0);
-                            mv.visitInsn(Opcodes.AALOAD);
-                            mv.visitVarInsn(Opcodes.ASTORE, 3);
-                            mv.visitVarInsn(Opcodes.ALOAD, 5);
-                            mv.visitInsn(Opcodes.ICONST_1);
-                            mv.visitInsn(Opcodes.AALOAD);
-                            mv.visitVarInsn(Opcodes.ASTORE, 4);
-                            mv.visitVarInsn(Opcodes.ALOAD, 3);
-                            mv.visitVarInsn(Opcodes.ALOAD, 4);
-                            mv.visitMethodInsn(Opcodes.INVOKESTATIC,
-                                GUARD_CLASS, "onReflectInvoke", "([Ljava/lang/String;)V", false);
-                        }
-                    };
-                }
-                
-                return mv;
-            }
-        };
-        cr.accept(cv, 0);
-        return cw.toByteArray();
-    }
-    
     private byte[] hookRuntime(byte[] classfileBuffer) {
-        ClassReader cr = new ClassReader(classfileBuffer);
-        ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
-        ClassVisitor cv = new ClassVisitor(Opcodes.ASM9, cw) {
-            @Override
-            public MethodVisitor visitMethod(int access, String name, String descriptor,
-                                             String signature, String[] exceptions) {
-                MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
-                
-                if ("exec".equals(name)) {
-                    return new MethodVisitor(Opcodes.ASM9, mv) {
-                        @Override
-                        public void visitCode() {
-                            super.visitCode();
-                            mv.visitVarInsn(Opcodes.ALOAD, 1);
-                            mv.visitMethodInsn(Opcodes.INVOKESTATIC,
-                                GUARD_CLASS, "onCommandExec", "(Ljava/lang/String;)V", false);
-                        }
-                    };
-                }
-                
-                return mv;
-            }
-        };
-        cr.accept(cv, 0);
-        return cw.toByteArray();
+        // 已移除，由 SecurityManager.checkExec 覆盖
+        return null;
     }
 
     private byte[] hookProcessBuilder(byte[] classfileBuffer) {
-        ClassReader cr = new ClassReader(classfileBuffer);
-        ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
-        ClassVisitor cv = new ClassVisitor(Opcodes.ASM9, cw) {
-            @Override
-            public MethodVisitor visitMethod(int access, String name, String descriptor,
-                                             String signature, String[] exceptions) {
-                MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
-                
-                if ("start".equals(name) && "()Ljava/lang/Process;".equals(descriptor)) {
-                    return new MethodVisitor(Opcodes.ASM9, mv) {
-                        @Override
-                        public void visitCode() {
-                            super.visitCode();
-                            mv.visitVarInsn(Opcodes.ALOAD, 0);
-                            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/ProcessBuilder", 
-                                    "command", "()Ljava/util/List;", false);
-                            mv.visitMethodInsn(Opcodes.INVOKESTATIC,
-                                GUARD_CLASS, "onProcessBuilderStart", "(Ljava/util/List;)V", false);
-                        }
-                    };
-                }
-                
-                return mv;
-            }
-        };
-        cr.accept(cv, 0);
-        return cw.toByteArray();
+        // 已移除，由 SecurityManager.checkExec 覆盖
+        return null;
     }
 }
