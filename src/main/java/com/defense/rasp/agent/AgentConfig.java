@@ -26,9 +26,13 @@ public class AgentConfig {
 
     private static BlockMode blockMode = BlockMode.MONITOR;
     private static long learningDurationMs = 300_000;
+    private static boolean debugLogEnabled = false;
+    private static boolean verboseInfoEnabled = false;
 
     public static BlockMode getBlockMode() { return blockMode; }
     public static long getLearningDurationMs() { return learningDurationMs; }
+    public static boolean isDebugLogEnabled() { return debugLogEnabled; }
+    public static boolean isVerboseInfoEnabled() { return verboseInfoEnabled; }
 
     public static void parseArgs(String agentArgs) {
         if (agentArgs == null || agentArgs.isEmpty()) return;
@@ -53,6 +57,17 @@ public class AgentConfig {
             }
         }
 
-        System.out.println("[StackAnomalyDetector] 配置加载完成 - 阻断模式: " + blockMode + ", 学习时长: " + learningDurationMs + "ms");
+        if (params.containsKey("debug.log")) {
+            debugLogEnabled = Boolean.parseBoolean(params.get("debug.log"));
+        }
+
+        if (params.containsKey("verbose.info")) {
+            verboseInfoEnabled = Boolean.parseBoolean(params.get("verbose.info"));
+        }
+
+        System.out.println("[StackAnomalyDetector] 配置加载完成 - 阻断模式: " + blockMode + 
+                ", 学习时长: " + learningDurationMs + "ms" +
+                ", debug日志: " + debugLogEnabled +
+                ", 详细INFO: " + verboseInfoEnabled);
     }
 }

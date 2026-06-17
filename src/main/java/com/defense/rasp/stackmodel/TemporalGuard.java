@@ -4,18 +4,13 @@ import java.nio.file.Path;
 
 /**
  * 统一检测入口：整合所有时空模型进行判定
- * 新增：通过 RaspSecurityManager 拦截文件 I/O
+ * 通过 RaspSecurityManager 拦截文件 I/O
  */
 public class TemporalGuard {
 
     private static final int HIGH_RISK_THRESHOLD = 50;
     private static final int MEDIUM_RISK_THRESHOLD = 20;
 
-    /**
-     * 判断是否为 JVM 内部系统调用
-     * 如果调用栈表明是 JVM 内部行为（如 PostVMInitHook、Launcher 等），则跳过检测
-     * 避免系统启动行为污染正常业务基线
-     */
     private static boolean isSystemInternalCall(StackTraceElement[] stack) {
         if (stack == null || stack.length == 0) return true;
         
@@ -40,16 +35,13 @@ public class TemporalGuard {
         return false;
     }
 
-    /**
-     * 目录列举检测入口
-     */
     public static void onFileList(java.io.File dir) {
         if (dir == null) return;
         StackTraceElement[] stack = Thread.currentThread().getStackTrace();
         if (isSystemInternalCall(stack)) return;
         
         String dirPath = dir.getAbsolutePath();
-        AlertLogger.info("[TemporalGuard] 目录列举检测触发: " + dirPath);
+        AlertLogger.debug("[TemporalGuard] 目录列举检测触发: " + dirPath);
         recordThreadEvent("java.io.FileSystem.list", StackTemporalEngine.CallEvent.EventType.ENTER);
         
         long jvmUptime = System.currentTimeMillis() - BaselineLearningEngine.LEARNING_START_TIME;
@@ -70,36 +62,27 @@ public class TemporalGuard {
         }
     }
 
-    /**
-     * NIO Path 读取检测入口 (ASM Hook 调用)
-     */
     public static void onPathRead(Path path) {
         if (path != null) onFileRead(path.toString());
     }
 
-    /**
-     * NIO Path 写入检测入口 (ASM Hook 调用)
-     */
     public static void onPathWrite(Path path) {
         if (path != null) onFileWrite(path.toString());
     }
 
-    /**
-     * NIO Path 删除检测入口 (ASM Hook 调用)
-     */
     public static void onPathDelete(Path path) {
         if (path != null) onFileDelete(path.toString());
     }
 
-    /**
-     * 文件读取检测入口（SecurityManager/ASM 调用）
-     */
     public static void onFileRead(String filePath) {
         if (filePath == null) return;
         StackTraceElement[] stack = Thread.currentThread().getStackTrace();
-        if (isSystemInternalCall(stack)) return;
+        if (isSystemInternalCall(stack)) {
+            AlertLogger.debug("[TemporalGuard] 系统内部文件读取: " + filePath);
+            return;
+        }
 
-        AlertLogger.info("[TemporalGuard] 文件读取检测触发: " + filePath);
+        AlertLogger.debug("[TemporalGuard] 文件读取检测触发: " + filePath);
         recordThreadEvent("java.io.FileInputStream.<init>", StackTemporalEngine.CallEvent.EventType.ENTER);
         
         long jvmUptime = System.currentTimeMillis() - BaselineLearningEngine.LEARNING_START_TIME;
@@ -113,18 +96,20 @@ public class TemporalGuard {
             block("高风险时空异常: 分数=" + anomalyScore + ", 文件=" + filePath, stack);
         } else if (anomalyScore >= MEDIUM_RISK_THRESHOLD) {
             alarm("中风险时空异常: 分数=" + anomalyScore + ", 文件=" + filePath, stack);
+        } else {
+            AlertLogger.countReadSkipped();
         }
     }
 
-    /**
-     * 文件写入检测入口（SecurityManager checkWrite 调用）
-     */
     public static void onFileWrite(String filePath) {
         if (filePath == null) return;
         StackTraceElement[] stack = Thread.currentThread().getStackTrace();
-        if (isSystemInternalCall(stack)) return;
+        if (isSystemInternalCall(stack)) {
+            AlertLogger.debug("[TemporalGuard] 系统内部文件写入: " + filePath);
+            return;
+        }
 
-        AlertLogger.info("[RaspSecurityManager] 文件写入拦截: " + filePath);
+        AlertLogger.debug("[RaspSecurityManager] 文件写入拦截: " + filePath);
         recordThreadEvent("java.io.FileOutputStream.<init>", StackTemporalEngine.CallEvent.EventType.ENTER);
         
         BaselineLearningEngine.learnNormalStack(stack, false);
@@ -135,18 +120,20 @@ public class TemporalGuard {
             block("高风险文件写入: 分数=" + score + ", 文件=" + filePath, stack);
         } else if (score >= MEDIUM_RISK_THRESHOLD) {
             alarm("中风险文件写入: 分数=" + score + ", 文件=" + filePath, stack);
+        } else {
+            AlertLogger.countWriteSkipped();
         }
     }
 
-    /**
-     * 文件删除检测入口（SecurityManager checkDelete 调用）
-     */
     public static void onFileDelete(String filePath) {
         if (filePath == null) return;
         StackTraceElement[] stack = Thread.currentThread().getStackTrace();
-        if (isSystemInternalCall(stack)) return;
+        if (isSystemInternalCall(stack)) {
+            AlertLogger.debug("[TemporalGuard] 系统内部文件删除: " + filePath);
+            return;
+        }
 
-        AlertLogger.info("[RaspSecurityManager] 文件删除拦截: " + filePath);
+        AlertLogger.debug("[RaspSecurityManager] 文件删除拦截: " + filePath);
         recordThreadEvent("java.io.File.delete", StackTemporalEngine.CallEvent.EventType.ENTER);
         
         BaselineLearningEngine.learnNormalStack(stack, false);
@@ -157,57 +144,48 @@ public class TemporalGuard {
             block("高风险文件删除: 分数=" + score + ", 文件=" + filePath, stack);
         } else if (score >= MEDIUM_RISK_THRESHOLD) {
             alarm("中风险文件删除: 分数=" + score + ", 文件=" + filePath, stack);
+        } else {
+            AlertLogger.countDeleteSkipped();
         }
     }
 
-    /**
-     * HTTP 请求检测入口 (ASM Hook HttpServlet.service 调用)
-     * 使用 Object 参数避免 SecurityManager 下类加载失败
-     */
     public static void onHttpServlet(Object req) {
         if (req == null) return;
         try {
             java.lang.reflect.Method m = req.getClass().getMethod("getRequestURI");
             String uri = (String) m.invoke(req);
-            AlertLogger.info("[TemporalGuard] HTTP 请求: " + uri);
+            AlertLogger.debug("[TemporalGuard] HTTP 请求: " + uri);
             recordThreadEvent("HttpServlet.service", StackTemporalEngine.CallEvent.EventType.ENTER);
-            
             long jvmUptime = System.currentTimeMillis() - BaselineLearningEngine.LEARNING_START_TIME;
             BaselineLearningEngine.learnNormalStack(Thread.currentThread().getStackTrace(), jvmUptime < 120_000);
+            AlertLogger.countHttpSkipped();
         } catch (Exception e) {
-            // 反射失败不影响正常请求
         }
     }
 
-    /**
-     * ServletContext 访问检测
-     */
     public static void onServletContextAccess(String path) {
         if (path != null) {
-            AlertLogger.info("[TemporalGuard] ServletContext 访问: " + path);
+            AlertLogger.debug("[TemporalGuard] ServletContext 访问: " + path);
             recordThreadEvent("ServletContext." + path, StackTemporalEngine.CallEvent.EventType.ENTER);
         }
     }
 
-    /**
-     * 反射调用检测入口
-     */
     public static void onReflectInvoke(String[] methodInfo) {
         if (methodInfo == null || methodInfo.length != 2) return;
         
         String fullSignature = methodInfo[0] + "." + methodInfo[1];
-        AlertLogger.info("[TemporalGuard] 反射调用检测触发：" + fullSignature);
+        AlertLogger.debug("[TemporalGuard] 反射调用检测触发: " + fullSignature);
         recordThreadEvent(fullSignature, StackTemporalEngine.CallEvent.EventType.ENTER);
         
         if (isSensitiveReflectCall(methodInfo[0], methodInfo[1])) {
-            AlertLogger.alarm("[ReflectDetector] 检测到敏感方法的反射调用：" + fullSignature);
+            AlertLogger.alarm("[ReflectDetector] 检测到敏感方法的反射调用: " + fullSignature);
             StackTraceElement[] stack = Thread.currentThread().getStackTrace();
             int anomalyScore = BaselineLearningEngine.detectAnomaly(stack, null);
             
             if (anomalyScore >= HIGH_RISK_THRESHOLD) {
-                block("高风险反射调用：分数=" + anomalyScore + ", 方法=" + fullSignature, stack);
+                block("高风险反射调用: 分数=" + anomalyScore + ", 方法=" + fullSignature, stack);
             } else if (anomalyScore >= MEDIUM_RISK_THRESHOLD) {
-                alarm("中风险反射调用：分数=" + anomalyScore + ", 方法=" + fullSignature, stack);
+                alarm("中风险反射调用: 分数=" + anomalyScore + ", 方法=" + fullSignature, stack);
             }
         }
     }
@@ -223,12 +201,9 @@ public class TemporalGuard {
         return false;
     }
 
-    /**
-     * 命令执行检测入口
-     */
     public static void onCommandExec(String command) {
         if (command == null || command.isEmpty()) return;
-        AlertLogger.info("[TemporalGuard] 命令执行检测触发: " + command);
+        AlertLogger.debug("[TemporalGuard] 命令执行检测触发: " + command);
         
         long jvmUptime = System.currentTimeMillis() - BaselineLearningEngine.LEARNING_START_TIME;
         boolean isStartup = jvmUptime < 120_000;
@@ -241,12 +216,11 @@ public class TemporalGuard {
             block("高风险命令执行: 分数=" + anomalyScore + ", 命令=" + command, stack);
         } else if (anomalyScore >= MEDIUM_RISK_THRESHOLD) {
             alarm("中风险命令执行: 分数=" + anomalyScore + ", 命令=" + command, stack);
+        } else {
+            AlertLogger.countExecSkipped();
         }
     }
     
-    /**
-     * ProcessBuilder.start() 检测
-     */
     public static void onProcessBuilderStart(java.util.List<String> cmdList) {
         if (cmdList == null || cmdList.isEmpty()) return;
         onCommandExec(String.join(" ", cmdList));
@@ -347,10 +321,6 @@ public class TemporalGuard {
 
     private static void alarm(String reason, StackTraceElement[] stack) {
         AlertLogger.alarm("[TemporalGuard] " + reason);
-    }
-
-    private static void AlarmWithDetail(String message) {
-        AlertLogger.alarm(message);
     }
 
     private static String formatStack(StackTraceElement[] stack) {

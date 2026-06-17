@@ -19,7 +19,7 @@ public class RaspSecurityManager extends java.lang.SecurityManager {
 
     public RaspSecurityManager(java.lang.SecurityManager parent) {
         this.parent = parent;
-        AlertLogger.info("[RaspSecurityManager] 初始化成功" + (parent != null ? "，已连接父级管理器" : ""));
+        AlertLogger.warn("[RaspSecurityManager] 初始化成功" + (parent != null ? "，已连接父级管理器" : ""));
     }
 
     @Override

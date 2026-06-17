@@ -76,6 +76,10 @@ public class AgentMain {
     public static void premain(String agentArgs, Instrumentation inst) {
         AgentConfig.parseArgs(agentArgs);
         
+        // 配置日志级别
+        com.defense.rasp.stackmodel.AlertLogger.setDebugEnabled(AgentConfig.isDebugLogEnabled());
+        com.defense.rasp.stackmodel.AlertLogger.setWriteInfoToFile(AgentConfig.isVerboseInfoEnabled());
+        
         System.out.println("[StackAnomalyDetector] Agent initialized with args: " + (agentArgs != null ? agentArgs : "none"));
         
         try {
@@ -270,6 +274,9 @@ public class AgentMain {
      */
     public static void agentmain(String agentArgs, Instrumentation inst) {
         AgentConfig.parseArgs(agentArgs);
+        
+        com.defense.rasp.stackmodel.AlertLogger.setDebugEnabled(AgentConfig.isDebugLogEnabled());
+        com.defense.rasp.stackmodel.AlertLogger.setWriteInfoToFile(AgentConfig.isVerboseInfoEnabled());
         
         System.out.println("[StackAnomalyDetector] Agent attached at runtime with args: " + (agentArgs != null ? agentArgs : "none"));
         

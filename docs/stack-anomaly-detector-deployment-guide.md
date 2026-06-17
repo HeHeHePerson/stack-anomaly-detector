@@ -6,7 +6,7 @@
 |------|---------|------|
 | JDK | 1.8+ | 编译目标 1.8，兼容 JDK 8/11/17 |
 | Tomcat | 8.5 / 9.x | 其他 Servlet 容器需单独验证 |
-| 磁盘空间 | 50MB | Agent JAR + 告警日志 |
+| 磁盘空间 | 50MB | Agent JAR + 告警日志（默认模式约 22KB/h） |
 
 ## 2. 部署步骤
 
@@ -59,14 +59,16 @@ curl -I http://localhost:8080/examples/
 
 ## 3. 参数说明
 
-### Agent 参数（-javaagent 等号后，逗号分隔）
+### 3.1 Agent 参数（-javaagent 等号后，逗号分隔）
 
 | 参数 | 默认值 | 说明 |
 |------|-------|------|
 | `block.mode` | `monitor` | `monitor` 仅告警不阻断；`block` 告警且阻断操作 |
 | `learning.duration` | `300000` (5分钟) | 学习期时长（毫秒） |
+| `debug.log` | `false` | `true` 输出完整调试日志（含每次文件操作和调用栈详情，用于排查） |
+| `verbose.info` | `false` | `true` 恢复 INFO 级别日志写入文件（仅当 `debug.log=true` 时有意义） |
 
-### JVM 系统属性（-D 参数）
+### 3.2 JVM 系统属性（-D 参数）
 
 | 参数 | 默认值 | 说明 |
 |------|-------|------|
@@ -145,7 +147,33 @@ curl -X POST http://localhost:8080/app/admin/config -d "..."
 
 ## 5. 告警日志
 
-### 5.1 日志位置
+### 5.1 日志级别与默认行为
+
+| 日志级别 | 默认生产 | `debug.log=true` | `verbose.info=true` | 写入条件 |
+|---------|---------|-----------------|--------------------|---------|
+| `DEBUG` | 不写 | 写入文件 | 写入文件 | 每次操作触发、学习事件等高频日志 |
+| `INFO` | 不写 | 不写 | 写入文件 | 不常用 |
+| `WARN` | 写入文件 | 写入文件 | 写入文件 | 学习完成、摘要统计、初始化 |
+| `ALARM` | 写入文件 | 写入文件 | 写入文件 | 异常检测命中 |
+| `BLOCK` | 写入文件 | 写入文件 | 写入文件 | 阻断操作触发 |
+| `ERROR` | 写入文件 | 写入文件 | 写入文件 | 异常错误 |
+
+### 5.2 日志量预估
+
+| 模式 | 典型日志量 | 说明 |
+|------|----------|------|
+| **默认生产模式** | ~22 KB/h | 仅写告警 + 每分钟一条摘要 + 学习完成通知 |
+| Debug 模式 | 按需可变 | 每次操作和调用栈全部写入，仅排查时开启 |
+
+### 5.3 摘要日志
+
+默认模式下不输出每次操作日志，改为每分钟汇总一条统计行：
+
+```
+[2026-06-17 01:12:44.017] [WARN] [摘要] 近60秒: 文件读取=0 文件写入=0 文件删除=0 命令执行=0 HTTP请求=27 学习事件=26
+```
+
+### 5.4 日志位置
 
 告警日志写入 Tomcat 工作目录下的 `stack-anomaly-alerts.log`：
 
@@ -153,15 +181,24 @@ curl -X POST http://localhost:8080/app/admin/config -d "..."
 $CATALINA_BASE/stack-anomaly-alerts.log
 ```
 
-### 5.2 日志格式
+### 5.5 日志格式
 
 ```
-[2026-06-16 03:20:01.926] [INFO] [TemporalGuard] HTTP 请求: /examples/servlets/
-[2026-06-16 03:20:01.939] [ALARM] [RaspSecurityManager] 中风险文件写入: 分数=35, 文件=/opt/tomcat/webapps/ROOT/index.jsp
-[2026-06-16 03:20:01.940] [BLOCK]  [MONITOR-ONLY] 高风险时空异常: 分数=65, 文件=/etc/passwd (仅告警模式)
+# 初始化
+[2026-06-17 01:11:24.881] [WARN] [RaspSecurityManager] 初始化成功
+
+# 学习完成
+[2026-06-17 01:11:49.875] [WARN] [BaselineLearning] 基线学习完成，进入检测模式。指纹数=27 转移图大小=136
+
+# 每分钟摘要
+[2026-06-17 01:12:44.017] [WARN] [摘要] 近60秒: 文件读取=156 文件写入=12 文件删除=0 命令执行=0 HTTP请求=42 学习事件=38
+
+# 告警事件
+[2026-06-17 01:15:01.940] [ALARM] [RaspSecurityManager] 中风险文件写入: 分数=35, 文件=/opt/tomcat/webapps/ROOT/index.jsp
+[2026-06-17 01:15:01.941] [ALARM] [MONITOR-ONLY] 高风险时空异常: 分数=65, 文件=/etc/passwd (仅告警模式)
 ```
 
-### 5.3 日志轮转
+### 5.6 日志轮转
 
 建议配置 `logrotate` 管理告警日志大小：
 
@@ -228,13 +265,19 @@ RASP SecurityManager 已安装
 
 若缺失，检查 JVM 是否支持 SecurityManager（JDK 17 需设置 `-Djava.security.manager=allow`，JDK 24+ 已移除）。
 
-### 7.4 排查流程
+### 7.4 日志量仍然过大
+
+确认未误开启 `debug.log=true`。默认生产模式下日志量为约 22 KB/h。若需要在排查期间启用详细日志，排查完成后务必关闭：
+移除 agent arg 中的 `debug.log=true` 并重启。
+
+### 7.5 排查流程
 
 ```
 1. 确认 Agent 加载: grep "Agent initialized" catalina.out
 2. 确认 SecurityManager 安装: grep "SecurityManager 已安装" catalina.out
 3. 确认 webapp 部署: grep "Server startup" catalina.out
 4. 确认检测生效: tail -f stack-anomaly-alerts.log
+5. 调试模式排查: 加 debug.log=true 参数重启后查看详细日志
 ```
 
 ## 8. 卸载

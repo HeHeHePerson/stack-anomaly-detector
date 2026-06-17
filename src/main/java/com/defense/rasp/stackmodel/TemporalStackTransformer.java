@@ -15,12 +15,12 @@ public class TemporalStackTransformer implements ClassFileTransformer {
                           byte[] classfileBuffer) {
 
         if ("javax/servlet/http/HttpServlet".equals(className)) {
-            AlertLogger.info("[TemporalStackTransformer] 插桩 HttpServlet");
+            AlertLogger.debug("[TemporalStackTransformer] 插桩 HttpServlet");
             return hookHttpServlet(classfileBuffer);
         }
 
         if ("javax/servlet/ServletContext".equals(className)) {
-            AlertLogger.info("[TemporalStackTransformer] 插桩 ServletContext");
+            AlertLogger.debug("[TemporalStackTransformer] 插桩 ServletContext");
             return hookServletContext(classfileBuffer);
         }
         

@@ -413,4 +413,76 @@ void block(String reason, StackTraceElement[] stack) {
 | ThreadLocal 防重入 | AlertLogger 写日志 → checkWrite → TemporalGuard → 递归 → StackOverflow |
 | 纯白名单基线模型 | 五层评分比单阈值更精细；学习期覆盖越多，误报越低 |
 | block.mode 默认 monitor | 安全第一，先验证无误报再切换阻断 |
+| 分层日志输出 | 默认只写 alarm/block/summary，debug 模式用于排查 |
+
+## 9. 日志架构
+
+### 9.1 分层设计
+
+| 级别 | 触发频率 | 默认输出 | 调试输出 | 写入条件 |
+|------|---------|---------|---------|---------|
+| `debug` | 极高（每次操作） | 无 | 文件 | `debug.log=true` |
+| `info` | 高 | 无 | 文件 | `verbose.info=true` |
+| `warn` | 低（分钟级） | 文件 | 文件 | 始终 |
+| `alarm` | 极低（仅异常） | 文件 | 文件 | 始终 |
+| `block` | 极低（仅高风险） | 文件 | 文件 | 始终 |
+| `error` | 极低（仅错误） | 文件+stderr | 文件+stderr | 始终 |
+
+### 9.2 防日志洪水的三层机制
+
+```
+┌─ 第一层: 日志级别过滤 ──────────────────────┐
+│ debug() → debug.log=true 才写              │
+│ info()  → verbose.info=true 才写           │
+│ alarm/block → 始终写（正常业务评分=0不触发） │
+└────────────────────────────────────────────┘
+
+┌─ 第二层: 计数器聚合 ────────────────────────┐
+│ countReadSkipped() → AtomicLong 递增       │
+│ countWriteSkipped() → AtomicLong 递增      │
+│ countHttpSkipped() → AtomicLong 递增       │
+│ ...                                        │
+│ 每 60 秒合并为一行摘要:                      │
+│ [WARN] [摘要] 近60秒: 文件读取=156 ...       │
+└────────────────────────────────────────────┘
+
+┌─ 第三层: 检测分数门控 ──────────────────────┐
+│ detectAnomaly() 返回 score                 │
+│ score < 20  → 无日志动作（计数器+1）         │
+│ score >= 20 → alarm() 写入告警             │
+│ score >= 50 → block() 写入阻断             │
+│ 只有真正的异常才会产生 alarm/block 日志      │
+└────────────────────────────────────────────┘
+```
+
+### 9.3 输出路径
+
+```
+alarm/block/warn → stack-anomaly-alerts.log（文件）
+error            → stack-anomaly-alerts.log + stderr
+debug/info       → stack-anomaly-alerts.log（仅当对应开关开启）
+
+System.out.println → catalina.out（仅 Agent 初始化、配置加载等启动阶段消息）
+```
+
+### 9.4 日志量对比
+
+| 模式 | 每次操作 | 每分钟 | 每小时 |
+|------|---------|-------|--------|
+| 优化前 | 6-8 行日志（含完整调用栈列表） | ~8.3 MB | **~500 MB** |
+| 默认生产 | 计数器 +1 | 1 行摘要（~120B） | **~22 KB** |
+| debug 模式 | 每操作 1-2 行 | 数千行 | 按需可变 |
+
+### 9.5 排查开关
+
+```bash
+# 生产模式（默认，日常运维推荐）
+-javaagent:...jar=block.mode=monitor
+
+# 排查误报、验证学习覆盖度时临时开启
+-javaagent:...jar=block.mode=monitor,debug.log=true
+
+# 同时恢复 INFO 级别（更全面）
+-javaagent:...jar=block.mode=monitor,debug.log=true,verbose.info=true
+```
 | catch(Throwable) 全静默 | 检测逻辑任何异常都不能中断正常业务流程 |
