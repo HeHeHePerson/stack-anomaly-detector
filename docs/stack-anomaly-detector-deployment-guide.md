@@ -22,15 +22,16 @@ cp stack-anomaly-detector-1.0.0-shaded.jar /opt/rasp/
 编辑 `$CATALINA_BASE/bin/setenv.sh`（或 Windows 下 `setenv.bat`）：
 
 ```bash
-# Linux
-export CATALINA_OPTS="\
-  -javaagent:/opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar=block.mode=monitor,learning.duration=600000 \
+# Linux - 使用 JAVA_OPTS 而非 CATALINA_OPTS
+# CATALINA_OPTS 会被 catalina.sh 通过 eval 处理，导致分号被解释为 shell 命令分隔符
+export JAVA_OPTS="\
+  -javaagent:/opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar=block.mode=monitor;learning.duration=600000 \
   -Drasp.sm.delay=30"
 ```
 
 ```bat
 REM Windows
-set CATALINA_OPTS=-javaagent:C:\rasp\stack-anomaly-detector-1.0.0-shaded.jar=block.mode=monitor,learning.duration=600000 -Drasp.sm.delay=30
+set JAVA_OPTS=-javaagent:C:\rasp\stack-anomaly-detector-1.0.0-shaded.jar=block.mode=monitor;learning.duration=600000 -Drasp.sm.delay=30
 ```
 
 ### 2.3 重启 Tomcat
@@ -45,9 +46,9 @@ $CATALINA_BASE/bin/catalina.sh start
 检查 `catalina.out` 中应出现以下日志：
 
 ```
-[StackAnomalyDetector] Agent initialized with args: block.mode=monitor,learning.duration=600000
-[StackAnomalyDetector] SecurityManager 将在 30 秒后安装
+[StackAnomalyDetector] Agent initialized with args: block.mode=monitor;learning.duration=600000
 [StackAnomalyDetector] RASP SecurityManager 已安装 (替换默认管理器)
+[StackAnomalyDetector] Bytecode transformer registered successfully
 ```
 
 确认 Tomcat 内置应用正常访问：
@@ -59,7 +60,7 @@ curl -I http://localhost:8080/examples/
 
 ## 3. 参数说明
 
-### 3.1 Agent 参数（-javaagent 等号后，逗号分隔）
+### 3.1 Agent 参数（-javaagent 等号后，分号分隔）
 
 | 参数 | 默认值 | 说明 |
 |------|-------|------|
@@ -222,7 +223,7 @@ $CATALINA_BASE/stack-anomaly-alerts.log
 
 ```bash
 # 修改 setenv.sh 中的 agent 参数
--javaagent:...jar=block.mode=block,learning.duration=600000
+-javaagent:...jar=block.mode=block;learning.duration=600000
 ```
 
 ### 6.2 阻断行为
@@ -244,18 +245,25 @@ monitor (部署初期 1~2 周)
 
 ## 7. 故障排查
 
-### 7.1 /examples 等内置应用返回 404
+### 7.1 参数未生效（catalina.sh eval 问题）
+
+若使用 `CATALINA_OPTS` 传递 agent 参数且参数包含分号，`catalina.sh` 的 `eval` 会将分号解释为 shell 命令分隔符，导致参数被截断。
+表现为日志中 `Agent initialized with args` 后面的参数不完整。
+
+解决方案：将 `CATALINA_OPTS` 改为 `JAVA_OPTS`（不会被 eval），或直接使用 `java` 命令启动。
+
+### 7.2 /examples 等内置应用返回 404
 
 确认 `-Drasp.sm.delay` 值足够大（建议 >= 15），确保 SecurityManager 在 Tomcat 完全启动后再安装。
 
-### 7.2 告警日志中出现大量正常业务操作
+### 7.3 告警日志中出现大量正常业务操作
 
 说明学习期内未覆盖该操作。处理方式：
 
 1. 延长学习期并重启，让该操作被学入基线
 2. 或者在告警分析中人工加白该类型的操作模式
 
-### 7.3 SecurityManager 未生效
+### 7.4 SecurityManager 未生效
 
 检查 `catalina.out` 中是否包含：
 
@@ -265,12 +273,12 @@ RASP SecurityManager 已安装
 
 若缺失，检查 JVM 是否支持 SecurityManager（JDK 17 需设置 `-Djava.security.manager=allow`，JDK 24+ 已移除）。
 
-### 7.4 日志量仍然过大
+### 7.5 日志量仍然过大
 
 确认未误开启 `debug.log=true`。默认生产模式下日志量为约 22 KB/h。若需要在排查期间启用详细日志，排查完成后务必关闭：
 移除 agent arg 中的 `debug.log=true` 并重启。
 
-### 7.5 排查流程
+### 7.6 排查流程
 
 ```
 1. 确认 Agent 加载: grep "Agent initialized" catalina.out

@@ -54,13 +54,15 @@ chmod 644 /opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar
 **Linux (setenv.sh)**:
 
 ```bash
-CATALINA_OPTS="$CATALINA_OPTS -javaagent:/opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar"
+# 使用 JAVA_OPTS 而非 CATALINA_OPTS
+# CATALINA_OPTS 会被 catalina.sh 通过 eval 处理，导致参数中的分号被截断
+JAVA_OPTS="$JAVA_OPTS -javaagent:/opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar"
 ```
 
 **Windows (setenv.bat)**:
 
 ```bat
-set CATALINA_OPTS=%CATALINA_OPTS% -javaagent:C:\opt\rasp\stack-anomaly-detector-1.0.0-shaded.jar
+set JAVA_OPTS=%JAVA_OPTS% -javaagent:C:\opt\rasp\stack-anomaly-detector-1.0.0-shaded.jar
 ```
 
 ### 4.2 Spring Boot 部署方式
@@ -96,7 +98,12 @@ java -javaagent:/opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar \
 
 **组合参数**：
 ```bash
--javaagent:/opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar=block.mode=monitor,learning.duration=600000
+-javaagent:/opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar=block.mode=monitor;learning.duration=600000
+```
+
+**调试日志（仅排查时开启）**：
+```bash
+-javaagent:/opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar=block.mode=monitor;learning.duration=600000;debug.log=true;verbose.info=true
 ```
 
 完整参数表：
@@ -104,8 +111,19 @@ java -javaagent:/opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar \
 |------|--------|--------|------|
 | `block.mode` | `monitor`, `block` | `monitor` | 检测到高风险行为时是否阻断（`monitor`=仅告警不阻断） |
 | `learning.duration` | 正整数（毫秒） | `300000` | 基线学习时长，此期间所有操作仅记录不告警 |
+| `debug.log` | `true`, `false` | `false` | 输出完整调试日志（含每次文件操作和调用栈详情） |
+| `verbose.info` | `true`, `false` | `false` | 恢复 INFO 级别日志写入文件（需配合 `debug.log=true`） |
 
-**注意**：`block.mode` 默认值为 `monitor`，确保新部署时不会因配置遗漏导致业务中断。
+**JVM 系统属性**：
+| 参数 | 默认值 | 说明 |
+|------|-------|------|
+| `rasp.sm.delay` | `15` | SecurityManager 延迟安装秒数（给 Tomcat 预留启动时间） |
+| `rasp.sm.immediate` | `false` | 设为 `true` 则立即安装 SecurityManager（非 Tomcat 环境） |
+
+**注意**：
+- `block.mode` 默认值为 `monitor`，确保新部署时不会因配置遗漏导致业务中断。
+- Agent 参数之间使用**分号**（`;`）分隔，不是逗号。
+- 使用 `JAVA_OPTS` 而非 `CATALINA_OPTS` 传递 agent 参数：`CATALINA_OPTS` 会被 `catalina.sh` 通过 `eval` 处理，导致分号被解释为 shell 命令分隔符，参数被截断。
 
 ## 5. 工作流程
 
@@ -140,18 +158,16 @@ JVM 启动
 | 文件写入 | `checkWrite()` | 冰蝎 `upload()`, `updateFile()`, `append()` |
 | 文件删除 | `checkDelete()` | 冰蝎 `delete()` |
 | 文件创建 | `checkWrite()` (自动覆盖) | 冰蝎 `create()`, `createDirectory()` |
+| 命令执行 | `checkExec()` | 冰蝎 `execCommand()` |
 
 ### 6.2 动态类 Hook（ASM Transformer 层）
 
 | 类 | 拦截点 | 说明 |
 |---|-------|------|
-| `javax.servlet.http.HttpServlet` | `service()` | HTTP 请求入口，关联请求上下文 |
-| `javax.servlet.ServletContext` | `getRealPath()`, `getResource()` | Web 资源访问检测 |
-| `java.nio.file.Files` | `readAllBytes()`, `write()`, `delete()` | NIO 文件操作 |
-| `java.lang.reflect.Method` | `invoke()` | 反射调用检测 |
-| `java.lang.Runtime` | `exec()` | 命令执行检测 |
-| `java.lang.ProcessBuilder` | `start()` | 进程创建检测 |
-| `java.io.FileDescriptor` | `open()` | 底层 I/O 操作（当动态加载时） |
+| `javax.servlet.http.HttpServlet` | `service(ServletRequest,ServletResponse)` | HTTP 请求入口，注入 beforeService/afterService 钩子，关联请求上下文，区分扫描器流量 |
+| `javax.servlet.ServletContext` | `getRealPath()`, `getResource()`, `getResourceAsStream()` | Web 资源访问检测 |
+
+> 文件 I/O（`java.nio.file.Files`、`java.io.FileInputStream` 等）、反射调用（`java.lang.reflect.Method.invoke()`）、命令执行（`Runtime.exec()`、`ProcessBuilder.start()`）已由 SecurityManager 层统一拦截，无需 ASM 字节码插桩。
 
 ### 6.3 敏感目标识别
 
@@ -175,19 +191,20 @@ JVM 启动
 ### 7.1 日志文件位置
 
 ```
-${catalina.base}/logs/
-├── rasp-agent.log      # Agent 运行日志
-├── rasp-alerts.log     # 告警日志 (ALARM)
-└── rasp-blocks.log     # 阻断日志 (BLOCK)
+${catalina.base}/
+└── stack-anomaly-alerts.log    # 统一告警日志（含初始化、学习进度、检测触发、摘要统计）
 ```
 
 ### 7.2 日志级别说明
 
-| 级别 | 标识 | 说明 |
-|------|------|------|
-| INFO | `[INFO]` | 系统状态、学习进度、检测触发 |
-| ALARM | `[ALARM]` | 检测到异常行为，记录告警 |
-| BLOCK | `[BLOCK]` | 达到阻断阈值，操作被拦截 |
+| 级别 | 标识 | 默认生产 | 说明 |
+|------|------|---------|------|
+| DEBUG | `[DEBUG]` | 不写 | 每次操作触发、学习事件等高频日志（需 `debug.log=true`） |
+| INFO | `[INFO]` | 不写 | 学习进度、检测触发（需 `verbose.info=true`） |
+| WARN | `[WARN]` | 写入 | 初始化、学习完成、每分钟摘要统计 |
+| ALARM | `[ALARM]` | 写入 | 异常行为检测命中 |
+| BLOCK | `[BLOCK]` | 写入 | 阻断操作触发 |
+| ERROR | `[ERROR]` | 写入 | 异常错误 |
 
 ### 7.3 日志示例
 
@@ -261,7 +278,15 @@ tail -f logs/rasp-alerts.log
 
 ## 9. 故障排查
 
-### 9.1 Agent 未加载
+### 9.1 参数未生效（catalina.sh eval 问题）
+
+**症状**: 启动日志中 `Agent initialized with args` 后面的参数不完整，或部分参数被当作 shell 命令执行。
+
+**原因**: `CATALINA_OPTS` 会被 `catalina.sh` 通过 `eval` 处理，分号被解释为 shell 命令分隔符。
+
+**解决**: 将 `CATALINA_OPTS` 改为 `JAVA_OPTS`（不会被 eval），或直接使用 `java` 命令启动 Tomcat。
+
+### 9.2 Agent 未加载
 
 **症状**: 启动日志中无 `[StackAnomalyDetector]` 相关日志
 
@@ -277,7 +302,7 @@ cat /path/to/tomcat/bin/setenv.sh
 ps aux | grep javaagent
 ```
 
-### 9.2 SecurityManager 安装失败
+### 9.3 SecurityManager 安装失败
 
 **症状**: 日志中出现 `SecurityManager 安装失败 (权限受限)`
 
@@ -293,7 +318,7 @@ cat /path/to/tomcat/conf/catalina.policy
 sudo systemctl start tomcat
 ```
 
-### 9.3 日志文件未生成
+### 9.4 日志文件未生成
 
 **症状**: `logs/` 目录下无 `rasp-*.log` 文件
 
@@ -310,7 +335,7 @@ mkdir -p /path/to/tomcat/logs/
 chmod 755 /path/to/tomcat/logs/
 ```
 
-### 9.4 误报处理
+### 9.5 误报处理
 
 **症状**: 正常业务操作被误报为异常
 

@@ -38,7 +38,7 @@ public class AgentConfig {
         if (agentArgs == null || agentArgs.isEmpty()) return;
 
         Map<String, String> params = new HashMap<>();
-        for (String pair : agentArgs.split(",")) {
+        for (String pair : agentArgs.split("[,;]")) {
             String[] kv = pair.split("=", 2);
             if (kv.length == 2) {
                 params.put(kv[0].trim(), kv[1].trim());

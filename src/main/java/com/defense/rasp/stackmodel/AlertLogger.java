@@ -120,9 +120,10 @@ public class AlertLogger {
         writeToFile(logMessage);
     }
 
-    /** alarm: 实际告警，始终写入文件 */
+    /** alarm: 实际告警，始终写入文件并输出到控制台 */
     public static void alarm(String message) {
         String logMessage = formatMessage("ALARM", message);
+        System.out.println(logMessage);
         writeToFile(logMessage);
     }
 

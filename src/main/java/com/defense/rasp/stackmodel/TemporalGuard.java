@@ -149,18 +149,46 @@ public class TemporalGuard {
         }
     }
 
-    public static void onHttpServlet(Object req) {
+    // 延迟学习：在 beforeService 记录 URI，afterService 根据响应状态决定是否学习
+    private static final ThreadLocal<String> PENDING_REQUEST_URI = new ThreadLocal<>();
+
+    public static void beforeService(Object req) {
+        AlertLogger.debug("[TemporalGuard] beforeService 被调用");
         if (req == null) return;
         try {
             java.lang.reflect.Method m = req.getClass().getMethod("getRequestURI");
             String uri = (String) m.invoke(req);
-            AlertLogger.debug("[TemporalGuard] HTTP 请求: " + uri);
-            recordThreadEvent("HttpServlet.service", StackTemporalEngine.CallEvent.EventType.ENTER);
-            long jvmUptime = System.currentTimeMillis() - BaselineLearningEngine.LEARNING_START_TIME;
-            BaselineLearningEngine.learnNormalStack(Thread.currentThread().getStackTrace(), jvmUptime < 120_000);
-            AlertLogger.countHttpSkipped();
+            PENDING_REQUEST_URI.set(uri);
+            AlertLogger.debug("[TemporalGuard] beforeService URI: " + uri);
         } catch (Exception e) {
+            AlertLogger.debug("[TemporalGuard] beforeService 失败: " + e.getMessage());
         }
+    }
+
+    public static void afterService(Object req, Object res) {
+        String uri = PENDING_REQUEST_URI.get();
+        PENDING_REQUEST_URI.remove();
+        if (uri == null) return;
+
+        // 学习期过滤：仅学习 2xx/3xx 成功响应，扫描器 404/403 不计入基线
+        if (BaselineLearningEngine.isLearningPhase()) {
+            try {
+                java.lang.reflect.Method m = res.getClass().getMethod("getStatus");
+                int status = (Integer) m.invoke(res);
+                if (status < 200 || status >= 400) {
+                    AlertLogger.debug("[TemporalGuard] 学习期跳过非成功响应: " + uri + " (status=" + status + ")");
+                    return;
+                }
+            } catch (Exception e) {
+                // 无法获取状态码时仍继续学习
+            }
+        }
+
+        AlertLogger.debug("[TemporalGuard] HTTP 请求: " + uri);
+        recordThreadEvent("HttpServlet.service", StackTemporalEngine.CallEvent.EventType.ENTER);
+        long jvmUptime = System.currentTimeMillis() - BaselineLearningEngine.LEARNING_START_TIME;
+        BaselineLearningEngine.learnNormalStack(Thread.currentThread().getStackTrace(), jvmUptime < 120_000);
+        AlertLogger.countHttpSkipped();
     }
 
     public static void onServletContextAccess(String path) {
