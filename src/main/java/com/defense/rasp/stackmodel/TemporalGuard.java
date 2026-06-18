@@ -38,7 +38,7 @@ public class TemporalGuard {
     public static void onFileList(java.io.File dir) {
         if (dir == null) return;
         StackTraceElement[] stack = Thread.currentThread().getStackTrace();
-        if (isSystemInternalCall(stack)) return;
+        if (PENDING_REQUEST_URI.get() == null && isSystemInternalCall(stack)) return;
         
         String dirPath = dir.getAbsolutePath();
         AlertLogger.debug("[TemporalGuard] 目录列举检测触发: " + dirPath);
@@ -48,6 +48,12 @@ public class TemporalGuard {
         boolean isStartup = jvmUptime < 120_000;
         
         BaselineLearningEngine.learnNormalStack(stack, isStartup);
+        
+        if (BaselineLearningEngine.isLearningPhase()) {
+            AlertLogger.debug("[TemporalGuard] 学习期目录列举: " + dirPath);
+            return;
+        }
+        
         int anomalyScore = BaselineLearningEngine.detectAnomaly(stack, dirPath);
         
         if (isSensitiveDirectory(dirPath)) {
@@ -77,7 +83,8 @@ public class TemporalGuard {
     public static void onFileRead(String filePath) {
         if (filePath == null) return;
         StackTraceElement[] stack = Thread.currentThread().getStackTrace();
-        if (isSystemInternalCall(stack)) {
+        // HTTP 请求上下文中的文件读取不视为系统内部调用，确保冰蝎等 Webshell 的文件读取能被检测
+        if (PENDING_REQUEST_URI.get() == null && isSystemInternalCall(stack)) {
             AlertLogger.debug("[TemporalGuard] 系统内部文件读取: " + filePath);
             return;
         }
@@ -89,8 +96,15 @@ public class TemporalGuard {
         boolean isStartup = jvmUptime < 120_000;
 
         BaselineLearningEngine.learnNormalStack(stack, isStartup);
+        
+        if (BaselineLearningEngine.isLearningPhase()) {
+            AlertLogger.debug("[TemporalGuard] 学习期文件读取: " + filePath);
+            AlertLogger.countReadSkipped();
+            return;
+        }
+        
         int anomalyScore = BaselineLearningEngine.detectAnomaly(stack, filePath);
-        if (isSensitiveFile(filePath)) anomalyScore += 20;
+        anomalyScore += analyzeFileSensitivity(filePath);
 
         if (anomalyScore >= HIGH_RISK_THRESHOLD) {
             block("高风险时空异常: 分数=" + anomalyScore + ", 文件=" + filePath, stack);
@@ -104,7 +118,7 @@ public class TemporalGuard {
     public static void onFileWrite(String filePath) {
         if (filePath == null) return;
         StackTraceElement[] stack = Thread.currentThread().getStackTrace();
-        if (isSystemInternalCall(stack)) {
+        if (PENDING_REQUEST_URI.get() == null && isSystemInternalCall(stack)) {
             AlertLogger.debug("[TemporalGuard] 系统内部文件写入: " + filePath);
             return;
         }
@@ -113,8 +127,15 @@ public class TemporalGuard {
         recordThreadEvent("java.io.FileOutputStream.<init>", StackTemporalEngine.CallEvent.EventType.ENTER);
         
         BaselineLearningEngine.learnNormalStack(stack, false);
+        
+        if (BaselineLearningEngine.isLearningPhase()) {
+            AlertLogger.debug("[TemporalGuard] 学习期文件写入: " + filePath);
+            AlertLogger.countWriteSkipped();
+            return;
+        }
+        
         int score = BaselineLearningEngine.detectAnomaly(stack, filePath);
-        if (isSensitiveFile(filePath)) score += 20;
+        score += analyzeFileSensitivity(filePath);
         
         if (score >= HIGH_RISK_THRESHOLD) {
             block("高风险文件写入: 分数=" + score + ", 文件=" + filePath, stack);
@@ -128,7 +149,7 @@ public class TemporalGuard {
     public static void onFileDelete(String filePath) {
         if (filePath == null) return;
         StackTraceElement[] stack = Thread.currentThread().getStackTrace();
-        if (isSystemInternalCall(stack)) {
+        if (PENDING_REQUEST_URI.get() == null && isSystemInternalCall(stack)) {
             AlertLogger.debug("[TemporalGuard] 系统内部文件删除: " + filePath);
             return;
         }
@@ -137,8 +158,15 @@ public class TemporalGuard {
         recordThreadEvent("java.io.File.delete", StackTemporalEngine.CallEvent.EventType.ENTER);
         
         BaselineLearningEngine.learnNormalStack(stack, false);
+        
+        if (BaselineLearningEngine.isLearningPhase()) {
+            AlertLogger.debug("[TemporalGuard] 学习期文件删除: " + filePath);
+            AlertLogger.countDeleteSkipped();
+            return;
+        }
+        
         int score = BaselineLearningEngine.detectAnomaly(stack, filePath);
-        if (isSensitiveFile(filePath)) score += 30;
+        score += analyzeFileSensitivity(filePath);
         
         if (score >= HIGH_RISK_THRESHOLD) {
             block("高风险文件删除: 分数=" + score + ", 文件=" + filePath, stack);
@@ -206,6 +234,11 @@ public class TemporalGuard {
         recordThreadEvent(fullSignature, StackTemporalEngine.CallEvent.EventType.ENTER);
         
         if (isSensitiveReflectCall(methodInfo[0], methodInfo[1])) {
+            if (BaselineLearningEngine.isLearningPhase()) {
+                AlertLogger.debug("[TemporalGuard] 学习期跳过反射告警: " + fullSignature);
+                return;
+            }
+            
             AlertLogger.alarm("[ReflectDetector] 检测到敏感方法的反射调用: " + fullSignature);
             StackTraceElement[] stack = Thread.currentThread().getStackTrace();
             int anomalyScore = BaselineLearningEngine.detectAnomaly(stack, null);
@@ -238,6 +271,13 @@ public class TemporalGuard {
         StackTraceElement[] stack = Thread.currentThread().getStackTrace();
 
         BaselineLearningEngine.learnNormalStack(stack, isStartup);
+        
+        if (BaselineLearningEngine.isLearningPhase()) {
+            AlertLogger.debug("[TemporalGuard] 学习期命令执行: " + command);
+            AlertLogger.countExecSkipped();
+            return;
+        }
+        
         int anomalyScore = BaselineLearningEngine.detectAnomaly(stack, null) + analyzeCommand(command);
 
         if (anomalyScore >= HIGH_RISK_THRESHOLD) {
@@ -290,33 +330,72 @@ public class TemporalGuard {
         return score;
     }
 
-    private static boolean isSensitiveFile(String filePath) {
-        if (filePath == null) return false;
+    private static int analyzeFileSensitivity(String filePath) {
+        if (filePath == null) return 0;
         String lowerPath = filePath.toLowerCase();
-        
-        String[] keywords = {
-            "tomcat-users.xml", "server.xml", "web.xml", "context.xml", "catalina.properties",
-            "application.properties", "application.yml", "logback.xml", "log4j", "jdbc.properties",
-            ".keystore", ".truststore", ".jks", ".p12", ".pfx", ".key", ".pem", "id_rsa",
-            "authorized_keys", ".ssh/", ".env", "/etc/passwd", "/etc/shadow",
-            "mysql", "postgres", "redis", "rabbitmq", "kafka", "nacos", "consul"
+        int score = 0;
+
+        // 最高风险：系统凭据文件和密钥
+        String[] criticalFiles = {
+            "/etc/passwd", "/etc/shadow", "id_rsa", "authorized_keys",
+            ".keystore", ".truststore", ".jks", ".p12", ".pfx"
         };
-        
-        for (String kw : keywords) {
+        for (String kw : criticalFiles) {
             if (lowerPath.contains(kw)) {
-                AlertLogger.alarm("[SensitiveFile] 敏感文件访问: " + filePath);
-                return true;
+                AlertLogger.alarm("[SensitiveFile] 高风险文件访问: " + filePath);
+                score += 60;
+                break;
             }
         }
-        
+
+        // 高风险：Web 容器核心配置
+        String[] highRiskFiles = {
+            "tomcat-users.xml", "server.xml", "web.xml", "context.xml",
+            "catalina.properties", "catalina.policy"
+        };
+        for (String kw : highRiskFiles) {
+            if (lowerPath.contains(kw)) {
+                AlertLogger.alarm("[SensitiveFile] 高风险配置访问: " + filePath);
+                score += 50;
+                break;
+            }
+        }
+
+        // 中高风险：密钥和凭证文件
+        String[] credentialFiles = {
+            ".key", ".pem", ".env", ".crt", ".cer", "private", "secret",
+            "password", "credential", "token"
+        };
+        for (String kw : credentialFiles) {
+            if (lowerPath.contains(kw)) {
+                score += 40;
+                break;
+            }
+        }
+
+        // 中风险：配置和数据库相关
+        String[] mediumRiskFiles = {
+            "application.properties", "application.yml", "logback.xml",
+            "log4j", "jdbc.properties", "mysql", "postgres", "redis",
+            "rabbitmq", "kafka", "nacos", "consul"
+        };
+        for (String kw : mediumRiskFiles) {
+            if (lowerPath.contains(kw)) {
+                score += 30;
+                break;
+            }
+        }
+
+        // 低风险：config/conf 目录下的配置文件
         if ((lowerPath.contains("config") || lowerPath.contains("conf")) && 
             (lowerPath.endsWith(".properties") || lowerPath.endsWith(".xml") ||
              lowerPath.endsWith(".yml") || lowerPath.endsWith(".yaml") ||
-             lowerPath.endsWith(".conf"))) {
-            return true;
+             lowerPath.endsWith(".conf") || lowerPath.endsWith(".policy") ||
+             lowerPath.endsWith(".xsd"))) {
+            score += 20;
         }
-        
-        return false;
+
+        return score;
     }
 
     private static boolean isSensitiveDirectory(String dirPath) {
