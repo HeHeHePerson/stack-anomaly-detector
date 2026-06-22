@@ -93,7 +93,11 @@ public class StackTemporalEngine {
             List<String> sigs = new ArrayList<>();
             for (StackTraceElement element : stack) {
                 if (element == null) continue;
-                sigs.add(element.getClassName() + "." + element.getMethodName());
+                String cn = element.getClassName();
+                String mn = element.getMethodName();
+                if (cn.startsWith("com.defense.rasp.")) continue;
+                if (cn.equals("java.lang.Thread") && mn.equals("getStackTrace")) continue;
+                sigs.add(cn + "." + mn);
             }
             return sigs;
         }

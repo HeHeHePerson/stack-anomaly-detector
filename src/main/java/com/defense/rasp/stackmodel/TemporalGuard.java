@@ -35,6 +35,21 @@ public class TemporalGuard {
         return false;
     }
 
+    private static boolean isNonSensitiveDefaultServletAccess(StackTraceElement[] stack, String filePath) {
+        if (PENDING_REQUEST_URI.get() == null) return false;
+        if (stack == null || stack.length == 0) return false;
+        if (analyzeFileSensitivity(filePath) > 0) return false;
+
+        for (int i = 1; i < stack.length; i++) {
+            String className = stack[i].getClassName();
+            if (className.equals("org.apache.catalina.servlets.DefaultServlet") ||
+                className.startsWith("org.apache.jasper.servlet.JspServlet")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static void onFileList(java.io.File dir) {
         if (dir == null) return;
         StackTraceElement[] stack = Thread.currentThread().getStackTrace();
@@ -53,6 +68,8 @@ public class TemporalGuard {
             AlertLogger.debug("[TemporalGuard] 学习期目录列举: " + dirPath);
             return;
         }
+        
+        if (isNonSensitiveDefaultServletAccess(stack, dirPath)) return;
         
         int anomalyScore = BaselineLearningEngine.detectAnomaly(stack, dirPath);
         
@@ -103,6 +120,11 @@ public class TemporalGuard {
             return;
         }
         
+        if (isNonSensitiveDefaultServletAccess(stack, filePath)) {
+            AlertLogger.countReadSkipped();
+            return;
+        }
+        
         int anomalyScore = BaselineLearningEngine.detectAnomaly(stack, filePath);
         anomalyScore += analyzeFileSensitivity(filePath);
 
@@ -134,6 +156,11 @@ public class TemporalGuard {
             return;
         }
         
+        if (isNonSensitiveDefaultServletAccess(stack, filePath)) {
+            AlertLogger.countWriteSkipped();
+            return;
+        }
+        
         int score = BaselineLearningEngine.detectAnomaly(stack, filePath);
         score += analyzeFileSensitivity(filePath);
         
@@ -161,6 +188,11 @@ public class TemporalGuard {
         
         if (BaselineLearningEngine.isLearningPhase()) {
             AlertLogger.debug("[TemporalGuard] 学习期文件删除: " + filePath);
+            AlertLogger.countDeleteSkipped();
+            return;
+        }
+        
+        if (isNonSensitiveDefaultServletAccess(stack, filePath)) {
             AlertLogger.countDeleteSkipped();
             return;
         }
