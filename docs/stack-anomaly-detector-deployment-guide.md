@@ -114,6 +114,7 @@ Agent 采用**纯白名单基线模型**，分为两个阶段：
 - **调用栈指纹 (SSF)**：整个调用栈的哈希指纹是否在基线库中（RASP 内部帧已过滤）
 - **方法转移图 (CTPG)**：方法 A → 方法 B 的调用关系是否出现过（RASP 内部帧已过滤，只追踪业务代码转移）
 - **线程轨迹 (TTT)**：单线程内的操作序列是否异常
+- **URL 基线 (URL Profile)**：学习期统计 URL 路径和参数模式，检测期识别新 URL、新参数、频率异常
 - **危险调用特征**：是否包含 Runtime.exec、反射+文件 IO 等组合
 - **敏感路径匹配**：`analyzeFileSensitivity` 分级评分（+20 ~ +60）代替简单布尔值，确保高敏感文件必定命中阈值
 - **HTTP 上下文保护 (isNonSensitiveDefaultServletAccess)**：检测期 HTTP 请求中 DefaultServlet/JspServlet 对非敏感文件的访问直接跳过检测
@@ -140,6 +141,14 @@ Agent 采用**纯白名单基线模型**，分为两个阶段：
 | analyzeFileSensitivity | +20 ~ +60 | 文件路径分级匹配（/etc/passwd=+60, web.xml=+50, .env=+40 等） |
 | analyzeCommand | +5 ~ +20 | 命令分级评分（whoami=+20, ls=+10, date=+5） |
 | 反射+文件IO组合 | +30 | 调用栈中同时出现反射调用和文件 I/O |
+
+**URL 基线独立告警**（不参与上述评分，通过 `[URL]` 前缀区分）：
+
+| 告警类型 | 触发条件 | 说明 |
+|---------|---------|------|
+| 新 URL | 学习期未出现的路径返回 2xx/3xx | 可能为新部署页面或攻击者发现的隐藏路径 |
+| 新参数 | 已知路径携带学习期未见的参数名 | 可能为 SQL 注入、命令注入等攻击参数 |
+| 频率异常 | 最近 10 次访问速率 > 基线 5 倍（30s 冷却） | 扫描器或 DoS 类型的突发流量 |
 
 ### 4.3 为什么学习期至关重要
 
@@ -201,6 +210,19 @@ curl -s http://localhost:8080/examples/
 ```
 
 > JSP 编译噪声：如果学习期未预编译 JSP，检测期访问 JSP 时，Jasper 的 JDT 编译器类加载（`org.eclipse.jdt.internal.compiler.*`）会产生大量 `DangerousClass: ClassLoader.loadClass` 告警，在调试模式下可达数千行日志，甚至导致 Tomcat OOM。
+
+#### 策略 D：URL 基线覆盖
+
+学习期内需覆盖所有正常业务路径（含带参数访问），确保检测期不多报"新 URL"告警：
+
+```bash
+# 访问所有业务页面，含典型参数模式
+curl "http://localhost:8080/app/page?lang=zh&page=1"
+curl "http://localhost:8080/app/search?q=test&type=all"
+curl "http://localhost:8080/app/api/list?sort=date&order=desc"
+```
+
+> 新 URL 告警：学习期未访问过的路径在检测期首次被成功处理时触发告警。若遗漏正常的业务路径，会被误报为新 URL。参数无需覆盖所有值，仅参数名被记录（如 `?lang=zh` 记录 `lang`，之后 `?lang=en` 不告警）。
 
 ## 5. 告警日志
 
@@ -336,7 +358,25 @@ monitor (部署初期 1~2 周)
 
 **注意**：通用 404 扫描器路径（如 wp-admin, phpmyadmin, backup 等）已被过滤为零误报。仅安全敏感性路径（/.env, /config/application.properties, /WEB-INF/web.xml）会继续告警。
 
-### 7.5 SecurityManager 未生效
+### 7.5 URL 基线告警排查
+
+**症状**：检测期出现 `[URL] 新URL首次出现` 或 `[URL] 新参数` 告警。
+
+**原因分析**：
+- `新URL首次出现`：该路径在学习期未被访问过，检测期首次被请求并返回 2xx/3xx
+- `新参数`：已知路径携带了学习期未出现的参数名
+
+**排查步骤**：
+1. 查看 `stack-anomaly-baseline-report.log` 中「URL 基线」章节，确认学习到的路径列表
+2. 若为正常业务页面，重新部署 Agent 并延长学习期（确保覆盖该路径）
+3. 若参数为正常业务逻辑新增（如新功能上线后新增的 `?feature=xxx`），需重新学习
+
+**注意**：
+- 扫描器 404 探测（如 /wp-admin → 404）不会触发 URL 告警 — 4xx/5xx 响应被静默过滤
+- 新参数检测仅对 2xx/3xx 响应生效 — 只有后端实际处理的参数才被检查
+- 频率异常告警内置 30 秒冷却 — 同一路径每分钟最多产生 2 条频率告警
+
+### 7.6 SecurityManager 未生效
 
 检查 `catalina.out` 中是否包含：
 
@@ -346,7 +386,7 @@ RASP SecurityManager 已安装
 
 若缺失，检查 JVM 是否支持 SecurityManager（JDK 17 需设置 `-Djava.security.manager=allow`，JDK 24+ 已移除）。
 
-### 7.6 JSP 编译期产生大量 DangerousClass 告警
+### 7.7 JSP 编译期产生大量 DangerousClass 告警
 
 **症状**：检测期首次访问 JSP 页面时，告警日志暴增，出现大量 `[DangerousClass] ClassLoader.loadClass` 告警，甚至导致 Tomcat OOM。
 
@@ -358,12 +398,12 @@ RASP SecurityManager 已安装
 $CATALINA_HOME/bin/jspc.sh -webapp /path/to/webapp
 ```
 
-### 7.7 日志量仍然过大
+### 7.8 日志量仍然过大
 
 确认未误开启 `debug.log=true`。默认生产模式下日志量为约 22 KB/h。若需要在排查期间启用详细日志，排查完成后务必关闭：
 移除 agent arg 中的 `debug.log=true` 并重启。
 
-### 7.8 排查流程
+### 7.9 排查流程
 
 ```
 1. 确认 Agent 加载: grep "Agent initialized" catalina.out
@@ -386,5 +426,52 @@ $CATALINA_BASE/bin/catalina.sh start
 
 ---
 
-**版本**: 1.0.0  
-**更新日期**: 2026-06-22
+## 9. 模型管理控制台 (Model Management Console)
+
+学习完成后，可通过内置 JSP 页面查看和微调四种模型。
+
+### 9.1 部署控制台
+
+将 `model-console.jsp` 复制到 Tomcat webapps 目录下：
+
+```bash
+cp model-console.jsp $CATALINA_BASE/webapps/examples/model-console.jsp
+```
+
+**在学习期预编译**，避免检测期触发 JDT 类加载告警：
+
+```bash
+curl -s http://localhost:8080/examples/model-console.jsp > /dev/null
+```
+
+### 9.2 功能说明
+
+| 功能 | 操作 | 效果 |
+|------|------|------|
+| SSF 指纹管理 | 选择指纹 → 提交 `action=remove_ssf` | 从启动/运行时指纹集合中移除，后续访问该调用栈触发 SSF 未知告警 |
+| CTPG 转移管理 | 低概率转移可移除 `action=remove_ctpg` | 从 `TransitionNode` 中移除指定目标方法 |
+| URL Profile 管理 | 选择路径 → 提交 `action=remove_url` | 从 BASELINE 中移除，后续访问触发新 URL 告警 |
+| 重新学习 | 提交 `action=relearn` | 清空所有基线数据，重新进入 30 秒学习期 |
+| 强制结束学习 | 提交 `action=force_complete` | 提前结束学习，立即进入检测模式 |
+
+### 9.3 微调即生效
+
+```
+model-console.jsp (POST)
+  → BaselineLearningEngine.removeFingerprint/removeTransition/forceLearningComplete()
+  → 内存集合实时修改
+  → 下次 detectAnomaly() 立即使用更新后的数据
+```
+
+无需重启 Tomcat，修改后下一次请求立即生效。
+
+### 9.4 注意事项
+
+- 无内置认证，建议生产环境仅内部可访问或配置 Tomcat 安全域
+- 控制台与自动生成的 `stack-anomaly-baseline-report.log` 互补：手动交互 vs 持久化归档
+- 误移除的项可通过"重新学习"恢复全部基线
+
+---
+
+**版本**: 1.0.2  
+**更新日期**: 2026-06-26

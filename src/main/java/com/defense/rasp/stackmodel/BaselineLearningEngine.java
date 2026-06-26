@@ -1,5 +1,9 @@
 package com.defense.rasp.stackmodel;
 
+import java.io.FileWriter;
+import java.io.PrintWriter;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -15,11 +19,15 @@ public class BaselineLearningEngine {
     private static final Set<Integer> NORMAL_RUNTIME_FINGERPRINTS = ConcurrentHashMap.newKeySet();
     private static final Set<StackTemporalEngine.StackFingerprint> FINGERPRINT_OBJECTS = 
             ConcurrentHashMap.newKeySet();
+    private static final ConcurrentHashMap<Integer, Long> FINGERPRINT_FREQUENCIES = 
+            new ConcurrentHashMap<>();
     private static final double MIN_NORMAL_PROBABILITY = 0.01;
     private static volatile boolean isLearningPhase = true;
     public static volatile long LEARNING_DURATION_MS = 300_000;
     public static volatile long LEARNING_START_TIME = System.currentTimeMillis();
     private static volatile long STARTUP_PERIOD_MS = 120_000;
+    private static volatile boolean baselineReportEnabled = true;
+    private static volatile boolean baselineReportGenerated = false;
 
     private static final ScheduledExecutorService LEARNING_MONITOR = 
             Executors.newSingleThreadScheduledExecutor(r -> {
@@ -38,10 +46,12 @@ public class BaselineLearningEngine {
                 long elapsed = System.currentTimeMillis() - LEARNING_START_TIME;
                 if (elapsed > LEARNING_DURATION_MS) {
                     isLearningPhase = false;
+                    UrlBaselineModel.finishLearning();
                     int totalFingerprints = NORMAL_STARTUP_FINGERPRINTS.size() + NORMAL_RUNTIME_FINGERPRINTS.size();
                     int graphSize = StackTemporalEngine.TRANSITION_GRAPH.size();
                     AlertLogger.warn("[BaselineLearning] 基线学习完成，进入检测模式。指纹数=" +
                             totalFingerprints + " 转移图大小=" + graphSize);
+                    generateReportIfNeeded();
                 }
             }
         }, 30, 30, TimeUnit.SECONDS);
@@ -53,7 +63,9 @@ public class BaselineLearningEngine {
 
         if (System.currentTimeMillis() - LEARNING_START_TIME > LEARNING_DURATION_MS) {
             isLearningPhase = false;
+            UrlBaselineModel.finishLearning();
             AlertLogger.warn("[BaselineLearning] 基线学习完成，进入检测模式");
+            generateReportIfNeeded();
             return;
         }
 
@@ -70,6 +82,7 @@ public class BaselineLearningEngine {
         }
 
         FINGERPRINT_OBJECTS.add(fingerprint);
+        FINGERPRINT_FREQUENCIES.merge(fingerprint.fingerprintHash, 1L, Long::sum);
 
         List<String> sigs = fingerprint.methodSignatures;
         for (int i = 0; i < sigs.size() - 1; i++) {
@@ -93,10 +106,11 @@ public class BaselineLearningEngine {
     }
 
     private static int detectAnomalyInternal(StackTraceElement[] stack, String targetFile, boolean forceDetect) {
-        if (isLearningPhase && !forceDetect) {
+            if (isLearningPhase && !forceDetect) {
             long elapsed = System.currentTimeMillis() - LEARNING_START_TIME;
             if (elapsed > LEARNING_DURATION_MS) {
                 isLearningPhase = false;
+                UrlBaselineModel.finishLearning();
                 AlertLogger.warn("[BaselineLearning] 基线学习完成，进入检测模式");
             } else {
                 learnNormalStack(stack, elapsed < STARTUP_PERIOD_MS);
@@ -223,11 +237,69 @@ public class BaselineLearningEngine {
         return StackTemporalEngine.TRANSITION_GRAPH.size();
     }
 
+    // ===== 模型查询与微调接口 =====
+
+    public static List<StackTemporalEngine.StackFingerprint> getFingerprintObjects() {
+        return new ArrayList<>(FINGERPRINT_OBJECTS);
+    }
+
+    public static long getFingerprintFrequency(int hash) {
+        return FINGERPRINT_FREQUENCIES.getOrDefault(hash, 0L);
+    }
+
+    public static boolean isStartupFingerprint(int hash) {
+        return NORMAL_STARTUP_FINGERPRINTS.contains(hash);
+    }
+
+    public static boolean isRuntimeFingerprint(int hash) {
+        return NORMAL_RUNTIME_FINGERPRINTS.contains(hash);
+    }
+
+    public static boolean removeFingerprint(int hash) {
+        boolean removed = false;
+        if (NORMAL_STARTUP_FINGERPRINTS.remove(hash)) removed = true;
+        if (NORMAL_RUNTIME_FINGERPRINTS.remove(hash)) removed = true;
+        if (removed) {
+            FINGERPRINT_OBJECTS.removeIf(fp -> fp.fingerprintHash == hash);
+            FINGERPRINT_FREQUENCIES.remove(hash);
+            AlertLogger.warn("[ModelMgmt] 移除SSF指纹: " + hash);
+        }
+        return removed;
+    }
+
+    public static Map<String, StackTemporalEngine.TransitionNode> getTransitionGraph() {
+        return new HashMap<>(StackTemporalEngine.TRANSITION_GRAPH);
+    }
+
+    public static boolean removeTransition(String sourceMethod, String targetMethod) {
+        StackTemporalEngine.TransitionNode node =
+                StackTemporalEngine.TRANSITION_GRAPH.get(sourceMethod);
+        if (node == null) return false;
+        boolean removed = node.removeTarget(targetMethod);
+        if (removed) {
+            AlertLogger.warn("[ModelMgmt] 移除CTPG转移: " + sourceMethod + " -> " + targetMethod);
+        }
+        return removed;
+    }
+
+    public static boolean forceLearningComplete() {
+        if (isLearningPhase) {
+            isLearningPhase = false;
+            UrlBaselineModel.finishLearning();
+            AlertLogger.warn("[ModelMgmt] 学习阶段被手动结束");
+            return true;
+        }
+        return false;
+    }
+
     public static void resetLearning() {
         NORMAL_STARTUP_FINGERPRINTS.clear();
         NORMAL_RUNTIME_FINGERPRINTS.clear();
         FINGERPRINT_OBJECTS.clear();
+        FINGERPRINT_FREQUENCIES.clear();
         StackTemporalEngine.TRANSITION_GRAPH.clear();
+        UrlBaselineModel.reset();
+        baselineReportGenerated = false;
         isLearningPhase = true;
         LEARNING_START_TIME = System.currentTimeMillis();
         AlertLogger.warn("[BaselineLearning] 学习状态已重置");
@@ -248,6 +320,142 @@ public class BaselineLearningEngine {
     public static void restoreDefaultConfig() {
         LEARNING_DURATION_MS = 300_000;
         STARTUP_PERIOD_MS = 120_000;
+    }
+
+    public static void setBaselineReportEnabled(boolean enabled) {
+        baselineReportEnabled = enabled;
+    }
+
+    private static void generateReportIfNeeded() {
+        if (!baselineReportEnabled || baselineReportGenerated) return;
+        baselineReportGenerated = true;
+        generateBaselineReport();
+    }
+
+    private static void generateBaselineReport() {
+        Path reportPath = getReportPath();
+        try {
+            java.nio.file.Files.createDirectories(reportPath.getParent());
+            PrintWriter pw = new PrintWriter(
+                    new FileWriter(reportPath.toFile(), false), true);
+
+            pw.println("============================================");
+            pw.println("  RASP 基线学习报告");
+            pw.println("============================================");
+            pw.println("学习开始: " + java.time.LocalDateTime.now()
+                    .minusNanos(TimeUnit.MILLISECONDS.toNanos(System.currentTimeMillis() - LEARNING_START_TIME))
+                    .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+            pw.println("学习完成: " + java.time.LocalDateTime.now()
+                    .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+            pw.println("学习时长: " + (LEARNING_DURATION_MS / 1000) + "s");
+            pw.println("启动期时长: " + (STARTUP_PERIOD_MS / 1000) + "s");
+            pw.println();
+
+            int totalEdges = 0;
+            for (StackTemporalEngine.TransitionNode node : StackTemporalEngine.TRANSITION_GRAPH.values()) {
+                totalEdges += node.getTotalTransitions();
+            }
+
+            pw.println("--- 统计摘要 ---");
+            pw.println("启动期指纹数: " + NORMAL_STARTUP_FINGERPRINTS.size());
+            pw.println("运行期指纹数: " + NORMAL_RUNTIME_FINGERPRINTS.size());
+            pw.println("总唯一指纹数: " + FINGERPRINT_OBJECTS.size());
+            pw.println("CTPG 转移图节点数: " + StackTemporalEngine.TRANSITION_GRAPH.size());
+            pw.println("CTPG 总转移边数: " + totalEdges);
+            pw.println("总学习事件数: " + FINGERPRINT_FREQUENCIES.values().stream().mapToLong(Long::longValue).sum());
+            pw.println();
+
+            pw.println("--- 调用栈指纹 (SSF) ---");
+            pw.println("(按方法数降序排列，显示所有指纹)");
+            pw.println();
+
+            List<StackTemporalEngine.StackFingerprint> sortedFingerprints = 
+                    new ArrayList<>(FINGERPRINT_OBJECTS);
+            sortedFingerprints.sort((a, b) -> Integer.compare(
+                    b.methodSignatures.size(), a.methodSignatures.size()));
+
+            int idx = 0;
+            for (StackTemporalEngine.StackFingerprint fp : sortedFingerprints) {
+                idx++;
+                long freq = FINGERPRINT_FREQUENCIES.getOrDefault(fp.fingerprintHash, 0L);
+                boolean isStartup = NORMAL_STARTUP_FINGERPRINTS.contains(fp.fingerprintHash);
+                boolean isRuntime = NORMAL_RUNTIME_FINGERPRINTS.contains(fp.fingerprintHash);
+                String phase = isStartup ? "启动期" : (isRuntime ? "运行期" : "双重");
+                if (isStartup && isRuntime) phase = "启动+运行";
+
+                pw.println("[指纹 " + idx + "] hash=" + fp.fingerprintHash +
+                        "  方法数=" + fp.methodSignatures.size() +
+                        "  频次=" + freq +
+                        "  阶段=" + phase);
+
+                for (String sig : fp.methodSignatures) {
+                    pw.println("  " + sig);
+                }
+                pw.println();
+            }
+
+            pw.println("--- 方法转移图 (CTPG) ---");
+            pw.println("(按源方法字母序，仅显示总转移 >= 5 的源方法)");
+            pw.println();
+
+            List<Map.Entry<String, StackTemporalEngine.TransitionNode>> sortedNodes =
+                    new ArrayList<>(StackTemporalEngine.TRANSITION_GRAPH.entrySet());
+            sortedNodes.sort(Map.Entry.comparingByKey());
+
+            int shownNodes = 0;
+            for (Map.Entry<String, StackTemporalEngine.TransitionNode> entry : sortedNodes) {
+                StackTemporalEngine.TransitionNode node = entry.getValue();
+                if (node.getTotalTransitions() < 5) continue;
+                shownNodes++;
+
+                pw.println(entry.getKey() + " (总转移=" + node.getTotalTransitions() +
+                        ", 目标数=" + node.getAllProbabilities().size() + ")");
+
+                Map<String, Double> probs = node.getAllProbabilities();
+                List<Map.Entry<String, Double>> sortedTargets = new ArrayList<>(probs.entrySet());
+                sortedTargets.sort((a, b) -> Double.compare(b.getValue(), a.getValue()));
+
+                for (Map.Entry<String, Double> target : sortedTargets) {
+                    pw.println(String.format("  → %s: %.1f%%",
+                            target.getKey(), target.getValue() * 100));
+                }
+                pw.println();
+            }
+
+            if (shownNodes == 0) {
+                pw.println("(无转移 >= 5 的源方法)");
+                pw.println();
+            }
+
+            pw.println(UrlBaselineModel.getReportSection());
+
+            pw.println("============================================");
+            pw.println("报告生成时间: " + java.time.LocalDateTime.now()
+                    .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+            pw.println("============================================");
+
+            pw.close();
+            AlertLogger.warn("[BaselineLearning] 基线报告已生成: " + reportPath.toAbsolutePath());
+        } catch (Exception e) {
+            AlertLogger.error("[BaselineLearning] 基线报告生成失败: " + e.getMessage());
+        }
+    }
+
+    private static Path getReportPath() {
+        String[] possiblePaths = {
+            System.getProperty("catalina.base"),
+            System.getProperty("jboss.server.base.dir"),
+            System.getProperty("weblogic.home"),
+            System.getProperty("user.dir"),
+            System.getProperty("java.io.tmpdir"),
+            "."
+        };
+        for (String basePath : possiblePaths) {
+            if (basePath != null && !basePath.isEmpty()) {
+                return Paths.get(basePath, "stack-anomaly-baseline-report.log");
+            }
+        }
+        return Paths.get("stack-anomaly-baseline-report.log");
     }
 
     private static int checkSensitiveFileAccess(String filePath) {

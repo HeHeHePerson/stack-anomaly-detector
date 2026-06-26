@@ -159,11 +159,20 @@ public class StackTemporalEngine {
          * 获取所有目标方法及其概率
          */
         public Map<String, Double> getAllProbabilities() {
-            Map<String, Double> probs = new HashMap<>();
-            if (totalTransitions == 0) return probs;
-            targetCounts.forEach((target, count) ->
-                    probs.put(target, (double) count / totalTransitions));
-            return probs;
+            Map<String, Double> probabilities = new HashMap<>();
+            for (Map.Entry<String, Long> entry : targetCounts.entrySet()) {
+                probabilities.put(entry.getKey(), (double) entry.getValue() / totalTransitions);
+            }
+            return probabilities;
+        }
+
+        public boolean removeTarget(String targetMethod) {
+            Long count = targetCounts.remove(targetMethod);
+            if (count != null) {
+                totalTransitions -= count;
+                return true;
+            }
+            return false;
         }
     }
 

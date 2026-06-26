@@ -65,6 +65,11 @@ public class AgentConfig {
             verboseInfoEnabled = Boolean.parseBoolean(params.get("verbose.info"));
         }
 
+        if (params.containsKey("baseline.report")) {
+            boolean enabled = Boolean.parseBoolean(params.get("baseline.report"));
+            com.defense.rasp.stackmodel.BaselineLearningEngine.setBaselineReportEnabled(enabled);
+        }
+
         System.out.println("[StackAnomalyDetector] 配置加载完成 - 阻断模式: " + blockMode + 
                 ", 学习时长: " + learningDurationMs + "ms" +
                 ", debug日志: " + debugLogEnabled +
