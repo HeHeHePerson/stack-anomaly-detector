@@ -70,6 +70,34 @@ public class AgentConfig {
             com.defense.rasp.stackmodel.BaselineLearningEngine.setBaselineReportEnabled(enabled);
         }
 
+        if (params.containsKey("url.param.threshold")) {
+            try {
+                int threshold = Integer.parseInt(params.get("url.param.threshold"));
+                if (threshold >= 100 && threshold <= 1000) {
+                    com.defense.rasp.stackmodel.UrlBaselineModel.setParamLengthThresholdPercent(threshold);
+                    System.out.println("[StackAnomalyDetector] URL参数值长度阈值: " + threshold + "%");
+                } else {
+                    System.out.println("[StackAnomalyDetector] URL参数值长度阈值超出范围(100-1000): " + threshold + "，使用默认 150");
+                }
+            } catch (NumberFormatException e) {
+                System.out.println("[StackAnomalyDetector] 无效的URL参数阈值: " + params.get("url.param.threshold") + "，使用默认 150");
+            }
+        }
+
+        if (params.containsKey("url.freq.threshold")) {
+            try {
+                double threshold = Double.parseDouble(params.get("url.freq.threshold"));
+                if (threshold >= 1.0 && threshold <= 10.0) {
+                    com.defense.rasp.stackmodel.UrlBaselineModel.setFrequencyThresholdMultiplier(threshold);
+                    System.out.println("[StackAnomalyDetector] URL频率阈值: " + threshold + "x");
+                } else {
+                    System.out.println("[StackAnomalyDetector] URL频率阈值超出范围(1.0-10.0): " + threshold + "，使用默认 1.5");
+                }
+            } catch (NumberFormatException e) {
+                System.out.println("[StackAnomalyDetector] 无效的URL频率阈值: " + params.get("url.freq.threshold") + "，使用默认 1.5");
+            }
+        }
+
         System.out.println("[StackAnomalyDetector] 配置加载完成 - 阻断模式: " + blockMode + 
                 ", 学习时长: " + learningDurationMs + "ms" +
                 ", debug日志: " + debugLogEnabled +

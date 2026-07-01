@@ -14,7 +14,8 @@ public class UrlBaselineModel {
     private static final ConcurrentHashMap<String, long[]> RECENT_TIMESTAMPS = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, Long> LAST_FREQ_ALARM = new ConcurrentHashMap<>();
     private static final int FREQUENCY_WINDOW_SIZE = 10;
-    private static final double FREQUENCY_THRESHOLD_MULTIPLIER = 5.0;
+    private static volatile double FREQUENCY_THRESHOLD_MULTIPLIER = 1.5;
+    private static volatile int URL_PARAM_LENGTH_THRESHOLD_PERCENT = 150;
     private static final long FREQUENCY_ALARM_COOLDOWN_MS = 30_000;
     private static final AtomicLong TOTAL_URLS_LEARNED = new AtomicLong();
     private static volatile boolean learningComplete = false;
@@ -23,6 +24,7 @@ public class UrlBaselineModel {
         public final String path;
         public final AtomicLong totalVisits = new AtomicLong();
         public final Set<String> paramKeys = ConcurrentHashMap.newKeySet();
+        public final ConcurrentHashMap<String, Integer> paramMaxLengths = new ConcurrentHashMap<>();
         public long learningDurationMs;
 
         UrlBaseline(String path, long durationMs) {
@@ -64,9 +66,16 @@ public class UrlBaselineModel {
         if (query != null && !query.isEmpty()) {
             for (String pair : query.split("&")) {
                 if (pair.isEmpty()) continue;
-                String key = pair.contains("=") ? pair.split("=", 2)[0] : pair;
+                int eqIdx = pair.indexOf('=');
+                String key = eqIdx >= 0 ? pair.substring(0, eqIdx) : pair;
+                String value = eqIdx >= 0 ? pair.substring(eqIdx + 1) : "";
                 if (!key.isEmpty()) {
                     baseline.paramKeys.add(key);
+                    int valLen = value.length();
+                    Integer existing = baseline.paramMaxLengths.get(key);
+                    if (existing == null || valLen > existing) {
+                        baseline.paramMaxLengths.put(key, valLen);
+                    }
                 }
             }
         }
@@ -88,10 +97,21 @@ public class UrlBaselineModel {
         if (query != null && !query.isEmpty()) {
             for (String pair : query.split("&")) {
                 if (pair.isEmpty()) continue;
-                String key = pair.contains("=") ? pair.split("=", 2)[0] : pair;
+                int eqIdx = pair.indexOf('=');
+                String key = eqIdx >= 0 ? pair.substring(0, eqIdx) : pair;
+                String value = eqIdx >= 0 ? pair.substring(eqIdx + 1) : "";
                 if (!key.isEmpty() && !baseline.paramKeys.contains(key)) {
                     AlertLogger.alarm("[URL] 新参数: " + path + " ?" + key + "=...");
                     break;
+                }
+                if (!key.isEmpty()) {
+                    Integer maxLen = baseline.paramMaxLengths.get(key);
+                    int valLen = value.length();
+                    if (maxLen != null && maxLen > 0 && valLen > maxLen * URL_PARAM_LENGTH_THRESHOLD_PERCENT / 100.0) {
+                        AlertLogger.alarm("[URL] 参数值长度超阈值: " + path + " ?" + key
+                                + "=" + valLen + " (基线最大=" + maxLen
+                                + ", 阈值=" + URL_PARAM_LENGTH_THRESHOLD_PERCENT + "%)");
+                    }
                 }
             }
         }
@@ -113,7 +133,8 @@ public class UrlBaselineModel {
                     LAST_FREQ_ALARM.put(path, now);
                     AlertLogger.alarm("[URL] 访问频率异常: " + path
                             + " (基线=" + String.format("%.1f", baselineRate)
-                            + "/min, 当前=" + String.format("%.1f", actualRate) + "/min)");
+                            + "/min, 当前=" + String.format("%.1f", actualRate)
+                            + "/min, 阈值=" + String.format("%.0f", FREQUENCY_THRESHOLD_MULTIPLIER * 100) + "%)");
                 }
             }
         }
@@ -149,6 +170,22 @@ public class UrlBaselineModel {
         return learningComplete;
     }
 
+    public static double getFrequencyThresholdMultiplier() {
+        return FREQUENCY_THRESHOLD_MULTIPLIER;
+    }
+
+    public static void setFrequencyThresholdMultiplier(double multiplier) {
+        FREQUENCY_THRESHOLD_MULTIPLIER = multiplier;
+    }
+
+    public static int getParamLengthThresholdPercent() {
+        return URL_PARAM_LENGTH_THRESHOLD_PERCENT;
+    }
+
+    public static void setParamLengthThresholdPercent(int percent) {
+        URL_PARAM_LENGTH_THRESHOLD_PERCENT = percent;
+    }
+
     public static boolean removeUrlPath(String path) {
         UrlBaseline removed = BASELINE.remove(path);
         if (removed != null) {
@@ -180,9 +217,9 @@ public class UrlBaselineModel {
                 sb.append("  ... (").append(sorted.size() - 50).append(" more)\n");
                 break;
             }
-            sb.append(String.format("  [%3d] %-60s 访问=%d次 (%.1f/min)  参数=%s\n",
+            sb.append(String.format("  [%3d] %-60s 访问=%d次 (%.1f/min)  参数=%s  值最大长度=%s\n",
                     count, ub.path, ub.totalVisits.get(),
-                    ub.visitsPerMinute(), ub.paramKeys));
+                    ub.visitsPerMinute(), ub.paramKeys, ub.paramMaxLengths));
         }
         sb.append("\n");
         return sb.toString();

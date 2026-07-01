@@ -68,6 +68,9 @@ curl -I http://localhost:8080/examples/
 | `learning.duration` | `300000` (5分钟) | 学习期时长（毫秒）。此期间所有操作只学习不告警，确保正常业务调用栈被录入基线 |
 | `debug.log` | `false` | `true` 输出完整调试日志（含每次文件操作和调用栈详情，用于排查误报） |
 | `verbose.info` | `false` | `true` 恢复 INFO 级别日志写入文件（仅当 `debug.log=true` 时有意义） |
+| `baseline.report` | `true` | `false` 禁用基线报告自动生成（`stack-anomaly-baseline-report.log`） |
+| `url.freq.threshold` | `1.5` | URL 访问频率异常阈值（倍数）。范围 1.0-10.0，超出使用默认值。学习期 1 分钟 N 次 → 检测期超 N×阈值 即告警 |
+| `url.param.threshold` | `150` | URL 参数值长度异常阈值（百分比）。范围 100-1000，超出使用默认值。学习期最大长度 L → 检测期超 L×阈值% 即告警 |
 
 ### 3.2 JVM 系统属性（-D 参数）
 
@@ -83,6 +86,8 @@ curl -I http://localhost:8080/examples/
 | `HIGH_RISK_THRESHOLD` | `TemporalGuard.java` | `50` | 高风险阈值，>= 此值触发 block/monitor |
 | `MEDIUM_RISK_THRESHOLD` | `TemporalGuard.java` | `20` | 中风险阈值，>= 此值触发 alarm |
 | `MIN_NORMAL_PROBABILITY` | `BaselineLearningEngine.java` | `0.01` | CTPG 最低正常概率，低于此值触发 +35 |
+| `FREQUENCY_THRESHOLD_MULTIPLIER` | `UrlBaselineModel.java` | `1.5` | URL 频率异常阈值倍数（可通过 `url.freq.threshold` 启动参数或管理控制台在线覆盖） |
+| `URL_PARAM_LENGTH_THRESHOLD_PERCENT` | `UrlBaselineModel.java` | `150` | URL 参数值长度异常阈值（可通过 `url.param.threshold` 启动参数或管理控制台在线覆盖） |
 | `STARTUP_PERIOD_MS` | `BaselineLearningEngine.java` | `120_000` | 启动期时长，此期间指纹记为启动指纹 |
 | 敏感文件字典 | `TemporalGuard.java:analyzeFileSensitivity()` | 分级评分 | +60/+50/+40/+30/+20 五个级别 |
 | 敏感命令字典 | `TemporalGuard.java:analyzeCommand()` | 命令评分 | whoami/+20, ls/+10, date/+5 等 |
@@ -360,20 +365,27 @@ monitor (部署初期 1~2 周)
 
 ### 7.5 URL 基线告警排查
 
-**症状**：检测期出现 `[URL] 新URL首次出现` 或 `[URL] 新参数` 告警。
+**症状**：检测期出现 `[URL] 新URL首次出现`、`[URL] 新参数`、`[URL] 参数值长度超阈值` 或 `[URL] 访问频率异常` 告警。
 
 **原因分析**：
 - `新URL首次出现`：该路径在学习期未被访问过，检测期首次被请求并返回 2xx/3xx
 - `新参数`：已知路径携带了学习期未出现的参数名
+- `参数值长度超阈值`：某参数的实际值长度超过了学习期记录的最大长度 × 阈值百分比（默认 150%）。例如学习期 `?q=abcd`（最大长度 4）→ 检测期 `?q=2KB_payload`（长度 2048 > 4×150%=6）触发告警
+- `访问频率异常`：某路径最近 10 次访问速率超过基线速率 × 频率阈值（默认 1.5x）
 
 **排查步骤**：
-1. 查看 `stack-anomaly-baseline-report.log` 中「URL 基线」章节，确认学习到的路径列表
+1. 查看 `stack-anomaly-baseline-report.log` 中「URL 基线」章节，确认学习到的路径列表和参数值最大长度
 2. 若为正常业务页面，重新部署 Agent 并延长学习期（确保覆盖该路径）
-3. 若参数为正常业务逻辑新增（如新功能上线后新增的 `?feature=xxx`），需重新学习
+3. 若参数值长度告警为正常业务输入（如富文本编辑器的长内容），可通过管理控制台提高 `url.param.threshold` 值（如 300%）
+4. 若频率告警为正常业务高峰期，可通过管理控制台提高 `url.freq.threshold` 值（如 3.0x）
+
+**阈值调节方式**：
+- 启动参数：`url.freq.threshold=2.0;url.param.threshold=300`）
+- 管理控制台：URL 标签页顶部的在线表单
 
 **注意**：
 - 扫描器 404 探测（如 /wp-admin → 404）不会触发 URL 告警 — 4xx/5xx 响应被静默过滤
-- 新参数检测仅对 2xx/3xx 响应生效 — 只有后端实际处理的参数才被检查
+- 新参数和参数值长度检测仅对 2xx/3xx 响应生效 — 只有后端实际处理的参数才被检查
 - 频率异常告警内置 30 秒冷却 — 同一路径每分钟最多产生 2 条频率告警
 
 ### 7.6 SecurityManager 未生效
@@ -451,6 +463,7 @@ curl -s http://localhost:8080/examples/model-console.jsp > /dev/null
 | SSF 指纹管理 | 选择指纹 → 提交 `action=remove_ssf` | 从启动/运行时指纹集合中移除，后续访问该调用栈触发 SSF 未知告警 |
 | CTPG 转移管理 | 低概率转移可移除 `action=remove_ctpg` | 从 `TransitionNode` 中移除指定目标方法 |
 | URL Profile 管理 | 选择路径 → 提交 `action=remove_url` | 从 BASELINE 中移除，后续访问触发新 URL 告警 |
+| 阈值在线调节 | URL 标签页表单 → 提交 `action=set_threshold` | 实时调整频率阈值（1.0-10.0x）和参数值长度阈值（100%-1000%），即时生效 |
 | 重新学习 | 提交 `action=relearn` | 清空所有基线数据，重新进入 30 秒学习期 |
 | 强制结束学习 | 提交 `action=force_complete` | 提前结束学习，立即进入检测模式 |
 
@@ -473,5 +486,5 @@ model-console.jsp (POST)
 
 ---
 
-**版本**: 1.0.2  
-**更新日期**: 2026-06-26
+**版本**: 1.0.3  
+**更新日期**: 2026-07-01

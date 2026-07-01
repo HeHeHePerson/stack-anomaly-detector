@@ -50,7 +50,15 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - ClassWriter.COMPUTE_FRAMES + ClassReader.EXPAND_FRAMES 两者缺一不可
   - JVM 的 classfile transformer 机制会静默吞掉此异常，导致类回退到原始字节码
 
-### Tomcat 进程清理：fuser -k 不可靠
+### JSP 管理页面需同步到项目工程和 docs 文档
+- Date: 2026-06-26
+- Context: Agent 之外如项目需要 JSP 实现管理功能（如模型管理控制台），编写的 JSP 文件需要同步到项目工程文件夹下
+- Category: 工作流协作
+- Instructions:
+  - JSP 源文件存放在 `src/main/webapp/` 目录下
+  - 部署时复制到 `$CATALINA_BASE/webapps/examples/` 目录
+  - 修改 JSP 后需清理 Jasper 编译缓存：`rm -rf $CATALINA_BASE/work/Catalina/localhost/examples/org/apache/jsp/model*`
+  - docs 中需配套 JSP 的部署和使用说明文档
 - Date: 2026-06-18
 - Context: Agent 在测试时发现多个 Tomcat 进程累积在端口上
 - Category: 排错调试
