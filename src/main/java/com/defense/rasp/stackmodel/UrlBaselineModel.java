@@ -17,6 +17,7 @@ public class UrlBaselineModel {
     private static volatile double FREQUENCY_THRESHOLD_MULTIPLIER = 1.5;
     private static volatile int URL_PARAM_LENGTH_THRESHOLD_PERCENT = 150;
     private static final long FREQUENCY_ALARM_COOLDOWN_MS = 30_000;
+    private static final Set<String> ALARMED_NEW_URLS = ConcurrentHashMap.newKeySet();
     private static final AtomicLong TOTAL_URLS_LEARNED = new AtomicLong();
     private static volatile boolean learningComplete = false;
 
@@ -89,7 +90,9 @@ public class UrlBaselineModel {
         UrlBaseline baseline = BASELINE.get(path);
 
         if (baseline == null) {
-            AlertLogger.alarm("[URL] 新URL首次出现: " + path);
+            if (ALARMED_NEW_URLS.add(path)) {
+                AlertLogger.alarm("[URL] 新URL首次出现: " + path);
+            }
             return;
         }
 
@@ -229,6 +232,7 @@ public class UrlBaselineModel {
         BASELINE.clear();
         RECENT_TIMESTAMPS.clear();
         LAST_FREQ_ALARM.clear();
+        ALARMED_NEW_URLS.clear();
         TOTAL_URLS_LEARNED.set(0);
         learningComplete = false;
     }

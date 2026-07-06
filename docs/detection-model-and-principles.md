@@ -294,7 +294,7 @@ if (hasWebEntry && !hasBusinessLayer && hasIO) → +20
 
 ### 3.4 URL Profile —— URL 基线统计 (URL Baseline Profile)
 
-**核心理念**：在学习期内统计所有成功请求（2xx/3xx）的 URL 路径和参数模式，形成正常访问画像。检测期对偏离基线的请求（新 URL、新参数、频率异常）产生告警。
+**核心理念**：在学习期内统计所有成功请求（2xx/3xx）的 URL 路径、参数名和参数值最大长度，形成正常访问画像。检测期对偏离基线的请求（新 URL、新参数、参数值长度超阈值、频率异常）产生告警。
 
 **数据结构**：
 
@@ -303,6 +303,7 @@ class UrlBaseline {
     String path;                      // 归一化路径（去查询串、去末尾斜杠）
     AtomicLong totalVisits;           // 学习期内总访问次数
     Set<String> paramKeys;            // 学习期内该路径出现的所有参数名
+    ConcurrentHashMap<String, Integer> paramMaxLengths;  // 每个参数的最大值长度
     long learningDurationMs;          // 学习时长，用于计算基准速率
 }
 
@@ -327,13 +328,14 @@ class UrlBaseline {
 
 | 规则 | 触发条件 | 评分 | 说明 |
 |------|---------|------|------|
-| 新 URL | path 不在 BASELINE 中，且响应为 2xx/3xx | 告警 | 学习期从未出现的路径被后端成功处理 |
+| 新 URL | path 不在 BASELINE 中，且响应为 2xx/3xx | 告警（仅首次） | 学习期从未出现的路径被后端成功处理，同一路径仅告警一次 |
 | 新参数 | path 在 BASELINE 中，但 query string 含未知参数名 | 告警 | 可能为攻击参数注入（如 ?cmd=whoami） |
 | 参数值长度超阈值 | path 在 BASELINE 中，参数值长度超过基线最大长度 × 阈值百分比（默认 150%） | 告警 | 防止超大 payload 注入（如 ?q=<3KB shellcode>） |
 | 频率异常 | 最近 10 次访问速率 > 基线速率 × 频率阈值（默认 1.5x） | 告警（30s 冷却） | 防止扫描器或 DoS 类型的突发流量 |
 
 **关键设计约束**：
 - 4xx/5xx 响应不触发任何 URL 告警 — 无目的性扫描产生的 404 不产生噪声
+- 新 URL 告警内置去重（`ALARMED_NEW_URLS` 集合）— 同一路径仅告警一次，避免日志重复刷屏
 - 参数值长度检测仅对成功响应（2xx/3xx）生效 — 确保参数被后端实际处理
 - 频率异常内置 30 秒冷却 — 同一路径每分钟最多告警 2 次
 - 频率阈值和参数值长度阈值均可通过启动参数 `url.freq.threshold` / `url.param.threshold` 调节，也可通过管理控制台在线设置
@@ -412,7 +414,7 @@ CTPG 建立转移边                  CTPG 继续建立转移边              de
 | 注册指纹哈希 | `NORMAL_STARTUP_FINGERPRINTS` 或 `NORMAL_RUNTIME_FINGERPRINTS` | SSF 匹配 |
 | 存储完整指纹对象 | `FINGERPRINT_OBJECTS` | LCS 相似度计算 |
 | 建立转移边 | `TRANSITION_GRAPH` (CTPG) | 转移概率评估 |
-| 记录 URL 路径与参数 | `UrlBaselineModel.BASELINE` | URL 基线比对 |
+| 记录 URL 路径、参数名与参数值最大长度 | `UrlBaselineModel.BASELINE` | URL 基线比对 |
 
 ### 4.3 学习期结束
 
@@ -680,6 +682,7 @@ void block(String reason, StackTraceElement[] stack) {
 | beforeService 拼接 query string | `HttpServletRequest.getRequestURI()` 不含 query string，需额外调用 `getQueryString()` 才能捕获参数用于基线学习 |
 | 频率异常 30s 冷却 | 突发流量中每个请求都可能超过阈值，冷却机制防止同一路径产生告警风暴 |
 | 4xx/5xx 不触发 URL 告警 | 无目的性扫描产生的 404 不是安全事件；仅后端实际处理的新 URL 和新参数才告警 |
+| 新 URL 告警去重 | 同一路径首次出现告警后加入 `ALARMED_NEW_URLS` 集合，后续访问不再重复告警；重新学习时清空 |
 
 ## 9. 日志架构
 
@@ -805,6 +808,57 @@ URL、CTPG 移除同理，修改后下一次检测立即生效，无需重启。
 - **控制台**：交互式操作，用于实时微调和验证调整效果
 - **报告**：持久化归档，用于审计和离线分析
 
+## 11. 告警与模型结果外发 (Forwarding)
+
+### 11.1 设计
+
+通过 `ForwardManager` 统一管理外发逻辑，支持 Syslog 和 Kafka 两种传输方式：
+
+```
+AlertLogger.alarm/block/warn()
+  └→ ForwardManager.sendAlert(level, prefix, message)
+     └→ Forwarder.send(json)
+        ├→ SyslogForwarder (UDP, RFC 5424, 无额外依赖)
+        └→ KafkaForwarder (需 kafka-clients)
+
+BaselineLearningEngine.finishLearning()
+  └→ ForwardManager.sendModelReport(...)
+     └→ 构建 SSF/CTPG/URL 结构化 JSON → Forwarder.send(json)
+```
+
+### 11.2 消息格式
+
+```json
+// 告警
+{"type":"alert","app":"order-service","timestamp":"1783223945012",
+ "level":"ALARM","prefix":"[URL]","message":"新URL首次出现: /examples"}
+
+// 模型报告
+{"type":"model","app":"order-service","timestamp":"1783223986480",
+ "ssf_count":99,"ctpg_size":205,"url_path_count":7,"url_total_requests":7,
+ "ssf_fingerprints":["hash1:89","hash2:98",...],
+ "ctpg_transitions":["src1:100","src2:50",...],
+ "url_paths":["/examples","/examples/index.html",...]}
+```
+
+### 11.3 启动参数
+
+| 参数 | 默认值 | 说明 |
+|------|-------|------|
+| `forward.type` | `none` | `syslog` / `kafka` / `none` |
+| `forward.app.name` | `rasp-agent` | 应用实例标识（多实例部署时区分不同 Java Web） |
+| `forward.syslog.host` | `localhost` | Syslog 服务器地址 |
+| `forward.syslog.port` | `514` | Syslog 服务器 UDP 端口 |
+
+### 11.4 发送时机
+
+| 事件 | 触发 |
+|------|------|
+| 告警 (ALARM) | 即时外发 |
+| 阻断 (BLOCK) | 即时外发 |
+| 警告 (WARN) | 即时外发（含学习完成通知） |
+| 模型报告 | 学习完成后外发一次，重新学习后再次触发 |
+
 ---
-**版本**: 1.0.3  
-**更新日期**: 2026-07-01
+**版本**: 1.1.0  
+**更新日期**: 2026-07-06

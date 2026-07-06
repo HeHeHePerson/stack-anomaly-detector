@@ -52,6 +52,7 @@ public class BaselineLearningEngine {
                     AlertLogger.warn("[BaselineLearning] 基线学习完成，进入检测模式。指纹数=" +
                             totalFingerprints + " 转移图大小=" + graphSize);
                     generateReportIfNeeded();
+                    forwardModelReport();
                 }
             }
         }, 30, 30, TimeUnit.SECONDS);
@@ -66,6 +67,7 @@ public class BaselineLearningEngine {
             UrlBaselineModel.finishLearning();
             AlertLogger.warn("[BaselineLearning] 基线学习完成，进入检测模式");
             generateReportIfNeeded();
+            forwardModelReport();
             return;
         }
 
@@ -112,6 +114,7 @@ public class BaselineLearningEngine {
                 isLearningPhase = false;
                 UrlBaselineModel.finishLearning();
                 AlertLogger.warn("[BaselineLearning] 基线学习完成，进入检测模式");
+                forwardModelReport();
             } else {
                 learnNormalStack(stack, elapsed < STARTUP_PERIOD_MS);
                 return 0;
@@ -287,6 +290,7 @@ public class BaselineLearningEngine {
             isLearningPhase = false;
             UrlBaselineModel.finishLearning();
             AlertLogger.warn("[ModelMgmt] 学习阶段被手动结束");
+            forwardModelReport();
             return true;
         }
         return false;
@@ -300,6 +304,7 @@ public class BaselineLearningEngine {
         StackTemporalEngine.TRANSITION_GRAPH.clear();
         UrlBaselineModel.reset();
         baselineReportGenerated = false;
+        com.defense.rasp.forward.ForwardManager.resetModelReportFlag();
         isLearningPhase = true;
         LEARNING_START_TIME = System.currentTimeMillis();
         AlertLogger.warn("[BaselineLearning] 学习状态已重置");
@@ -330,6 +335,51 @@ public class BaselineLearningEngine {
         if (!baselineReportEnabled || baselineReportGenerated) return;
         baselineReportGenerated = true;
         generateBaselineReport();
+    }
+
+    private static void forwardModelReport() {
+        try {
+            int fCount = FINGERPRINT_OBJECTS.size();
+            int gSize = StackTemporalEngine.TRANSITION_GRAPH.size();
+            int urlCount = UrlBaselineModel.getBaselineEntries().size();
+            long urlTotal = UrlBaselineModel.getTotalUrlsLearned();
+
+            StringBuilder ssfJson = new StringBuilder("[");
+            boolean first = true;
+            for (StackTemporalEngine.StackFingerprint fp : FINGERPRINT_OBJECTS) {
+                if (!first) ssfJson.append(",");
+                first = false;
+                ssfJson.append("\"").append(com.defense.rasp.forward.ForwardManager.escapeJson(
+                    fp.fingerprintHash + ":" + fp.methodSignatures.size())).append("\"");
+            }
+            ssfJson.append("]");
+
+            StringBuilder ctpgJson = new StringBuilder("[");
+            first = true;
+            for (Map.Entry<String, StackTemporalEngine.TransitionNode> e : StackTemporalEngine.TRANSITION_GRAPH.entrySet()) {
+                if (!first) ctpgJson.append(",");
+                first = false;
+                ctpgJson.append("\"").append(com.defense.rasp.forward.ForwardManager.escapeJson(
+                    e.getKey() + ":" + e.getValue().getTotalTransitions())).append("\"");
+            }
+            ctpgJson.append("]");
+
+            StringBuilder urlJson = new StringBuilder("[");
+            first = true;
+            for (Map.Entry<String, UrlBaselineModel.UrlBaseline> e : UrlBaselineModel.getBaselineEntries().entrySet()) {
+                if (!first) urlJson.append(",");
+                first = false;
+                urlJson.append("\"").append(com.defense.rasp.forward.ForwardManager.escapeJson(
+                    e.getKey())).append("\"");
+            }
+            urlJson.append("]");
+
+            com.defense.rasp.forward.ForwardManager.sendModelReport(
+                ssfJson.toString(), ctpgJson.toString(), urlJson.toString(),
+                fCount, gSize, urlCount, urlTotal);
+        } catch (Exception ex) {
+            System.err.println("[ForwardManager] 模型报告构建失败: " + ex.getMessage());
+        }
     }
 
     private static void generateBaselineReport() {

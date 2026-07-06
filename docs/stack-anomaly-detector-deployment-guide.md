@@ -24,9 +24,7 @@ cp stack-anomaly-detector-1.0.0-shaded.jar /opt/rasp/
 ```bash
 # Linux - 使用 JAVA_OPTS 而非 CATALINA_OPTS
 # CATALINA_OPTS 会被 catalina.sh 通过 eval 处理，导致分号被解释为 shell 命令分隔符
-export JAVA_OPTS="\
-  -javaagent:/opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar=block.mode=monitor;learning.duration=600000 \
-  -Drasp.sm.delay=30"
+export JAVA_OPTS="-javaagent:/opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar=block.mode=monitor;learning.duration=600000 -Drasp.sm.delay=30"
 ```
 
 ```bat
@@ -71,6 +69,10 @@ curl -I http://localhost:8080/examples/
 | `baseline.report` | `true` | `false` 禁用基线报告自动生成（`stack-anomaly-baseline-report.log`） |
 | `url.freq.threshold` | `1.5` | URL 访问频率异常阈值（倍数）。范围 1.0-10.0，超出使用默认值。学习期 1 分钟 N 次 → 检测期超 N×阈值 即告警 |
 | `url.param.threshold` | `150` | URL 参数值长度异常阈值（百分比）。范围 100-1000，超出使用默认值。学习期最大长度 L → 检测期超 L×阈值% 即告警 |
+| `forward.type` | `none` | 告警和模型结果外发类型：`syslog`（UDP RFC 5424）、`kafka`（需 kafka-clients）、`none`（不启用） |
+| `forward.app.name` | `rasp-agent` | 应用实例标识。由用户自行指定一个能区分不同 Java Web 实例的名称，消费端据此识别日志来源。同一 Tomcat 下所有 webapps 共享该值 |
+| `forward.syslog.host` | `localhost` | Syslog 服务器地址 |
+| `forward.syslog.port` | `514` | Syslog 服务器 UDP 端口 |
 
 ### 3.2 JVM 系统属性（-D 参数）
 
@@ -227,7 +229,7 @@ curl "http://localhost:8080/app/search?q=test&type=all"
 curl "http://localhost:8080/app/api/list?sort=date&order=desc"
 ```
 
-> 新 URL 告警：学习期未访问过的路径在检测期首次被成功处理时触发告警。若遗漏正常的业务路径，会被误报为新 URL。参数无需覆盖所有值，仅参数名被记录（如 `?lang=zh` 记录 `lang`，之后 `?lang=en` 不告警）。
+> **URL 基线学习要点**：学习期未访问过的路径在检测期首次被成功处理时触发`[URL] 新URL首次出现`告警。参数名和学习期出现的最大参数值长度均被记录（如 `?lang=zh` 记录参数 `lang` 最大长度 2，之后 `?lang=en` 长度 2 不超阈值，但 `?lang=verylongvalue` 长度 13 > 2×150%=3 会触发参数值长度超阈值告警）。建议学习期使用代表性的参数值（如正常业务中最长的典型输入），避免过短的基线导致误报。
 
 ## 5. 告警日志
 
@@ -368,7 +370,7 @@ monitor (部署初期 1~2 周)
 **症状**：检测期出现 `[URL] 新URL首次出现`、`[URL] 新参数`、`[URL] 参数值长度超阈值` 或 `[URL] 访问频率异常` 告警。
 
 **原因分析**：
-- `新URL首次出现`：该路径在学习期未被访问过，检测期首次被请求并返回 2xx/3xx
+- `新URL首次出现`：该路径在学习期未被访问过，检测期首次被请求并返回 2xx/3xx。同一路径仅告警一次（内置去重），后续访问不再产生告警
 - `新参数`：已知路径携带了学习期未出现的参数名
 - `参数值长度超阈值`：某参数的实际值长度超过了学习期记录的最大长度 × 阈值百分比（默认 150%）。例如学习期 `?q=abcd`（最大长度 4）→ 检测期 `?q=2KB_payload`（长度 2048 > 4×150%=6）触发告警
 - `访问频率异常`：某路径最近 10 次访问速率超过基线速率 × 频率阈值（默认 1.5x）
@@ -484,7 +486,76 @@ model-console.jsp (POST)
 - 控制台与自动生成的 `stack-anomaly-baseline-report.log` 互补：手动交互 vs 持久化归档
 - 误移除的项可通过"重新学习"恢复全部基线
 
+## 10. 告警与模型结果外发 (Forwarding)
+
+### 10.1 启用配置
+
+```bash
+# 最小配置
+-javaagent:rasp.jar=forward.type=syslog,forward.app.name=my-service
+
+# 完整配置
+-javaagent:rasp.jar=forward.type=syslog,forward.app.name=order-service,forward.syslog.host=192.168.1.100,forward.syslog.port=514
+```
+
+### 10.2 Syslog 接收测试
+
+项目内置最小化 Syslog 接收器 `tools/syslog-receiver.py`，无需额外安装：
+
+```bash
+# 基础用法（默认端口 514）
+python3 tools/syslog-receiver.py
+
+# 指定端口
+python3 tools/syslog-receiver.py 1514
+
+# JSON 格式化输出
+python3 tools/syslog-receiver.py 514 --json
+
+# 输出到文件
+python3 tools/syslog-receiver.py 514 --file /tmp/syslog-received.log
+```
+
+#### 最小化验证流程
+
+```bash
+# 步骤1: 启动 Syslog 接收器（终端1）
+python3 tools/syslog-receiver.py 514
+
+# 步骤2: 启动 Tomcat 并配置转发参数（终端2）
+export CATALINA_OPTS="-javaagent:/opt/tomcat85/stack-anomaly-detector.jar=forward.type=syslog,forward.app.name=my-test-app,forward.syslog.host=127.0.0.1,forward.syslog.port=514,debug.log=true"
+/opt/tomcat85/bin/catalina.sh run
+
+# 预期结果:
+# Syslog 接收器终端将打印类似:
+#   [10:30:12] #1 my-test-app [CTPG] CTPG模型加载完成
+#   [10:30:15] #2 my-test-app [URL] 新URL首次出现: /examples
+#   [10:30:45] #3 my-test-app MODEL: SSF=15 CTPG=83 URL=2
+```
+
+### 10.3 接收到的消息示例
+
+```
+告警:
+<134>1 2026-07-05T03:59:17.430+0000 localhost raspt-forwarder - - -
+{"type":"alert","app":"test-webapp-01","timestamp":"1783223957430",
+ "level":"ALARM","prefix":"[URL]","message":"新URL首次出现: /examples"}
+
+模型报告:
+<134>1 2026-07-05T03:59:46.480+0000 localhost raspt-forwarder - - -
+{"type":"model","app":"test-webapp-01","timestamp":"1783223986480",
+ "ssf_count":15,"ctpg_size":83,"url_path_count":2,"url_total_requests":2,
+ "ssf_fingerprints":["hash:89",...],"ctpg_transitions":["src:100",...],"url_paths":["/examples",...]}
+```
+
+### 10.4 转发时机
+
+| 类型 | 触发条件 | 频率 |
+|------|---------|------|
+| alert | AlertLogger.alarm/block/warn() 调用时 | 每次告警即时外发 |
+| model | BaselineLearningEngine 学习阶段结束时 | 每次学习完成外发一次，重新学习后再次触发 |
+
 ---
 
-**版本**: 1.0.3  
-**更新日期**: 2026-07-01
+**版本**: 1.1.0  
+**更新日期**: 2026-07-06

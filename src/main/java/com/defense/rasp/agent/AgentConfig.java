@@ -98,6 +98,17 @@ public class AgentConfig {
             }
         }
 
+        if (params.containsKey("forward.type")) {
+            String ft = params.get("forward.type");
+            String app = params.containsKey("forward.app.name") ? params.get("forward.app.name") : "";
+            String host = params.containsKey("forward.syslog.host") ? params.get("forward.syslog.host") : "localhost";
+            int port = 514;
+            if (params.containsKey("forward.syslog.port")) {
+                try { port = Integer.parseInt(params.get("forward.syslog.port")); } catch (NumberFormatException ignored) {}
+            }
+            com.defense.rasp.forward.ForwardManager.init(ft, app, host, port);
+        }
+
         System.out.println("[StackAnomalyDetector] 配置加载完成 - 阻断模式: " + blockMode + 
                 ", 学习时长: " + learningDurationMs + "ms" +
                 ", debug日志: " + debugLogEnabled +

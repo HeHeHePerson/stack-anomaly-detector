@@ -68,8 +68,7 @@ set JAVA_OPTS=%JAVA_OPTS% -javaagent:C:\opt\rasp\stack-anomaly-detector-1.0.0-sh
 ### 4.2 Spring Boot 部署方式
 
 ```bash
-java -javaagent:/opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar \
-     -jar your-application.jar
+java -javaagent:/opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar -jar your-application.jar
 ```
 
 ### 4.3 通用启动参数（可配置）
@@ -116,6 +115,10 @@ java -javaagent:/opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar \
 | `baseline.report` | `true`, `false` | `true` | 学习结束后自动生成基线报告（`stack-anomaly-baseline-report.log`） |
 | `url.freq.threshold` | 1.0 ~ 10.0 | `1.5` | URL 访问频率异常阈值（倍数），检测期速率超过基线速率 × 阈值时告警 |
 | `url.param.threshold` | 100 ~ 1000 | `150` | URL 参数值长度异常阈值（百分比），参数值长度超过基线最大长度 × 阈值% 时告警 |
+| `forward.type` | `syslog`, `kafka`, `none` | `none` | 告警和模型结果外发类型。`syslog` 使用 UDP RFC 5424 协议；`kafka` 需在 pom.xml 中添加 kafka-clients 依赖 |
+| `forward.app.name` | 任意字符串 | `rasp-agent` | 应用实例标识。由用户自行指定一个能区分不同 Java Web 实例的名称，同一 Tomcat 下所有 webapps 共享该值。消费端据此识别告警/模型报告来自哪个实例（如 `order-service-prod`、`payment-tomcat-01`） |
+| `forward.syslog.host` | IP/主机名 | `localhost` | Syslog 服务器地址 |
+| `forward.syslog.port` | 1-65535 | `514` | Syslog 服务器 UDP 端口 |
 
 **JVM 系统属性**：
 | 参数 | 默认值 | 说明 |
@@ -214,13 +217,14 @@ JVM 启动
 
 ### 6.4 URL 基线检测 (URL Profile)
 
-系统在学习期内统计所有成功请求（2xx/3xx）的 URL 路径和参数名，形成正常访问画像。检测期对偏离基线的行为产生独立告警（`[URL]` 前缀，不与 SSF/CTPG/TTT 评分合并）。
+系统在学习期内统计所有成功请求（2xx/3xx）的 URL 路径、参数名和参数值最大长度，形成正常访问画像。检测期对偏离基线的行为产生独立告警（`[URL]` 前缀，不与 SSF/CTPG/TTT 评分合并）。
 
 | 告警类型 | 触发条件 | 示例 |
 |---------|---------|------|
-| `[URL] 新URL首次出现` | 学习期未见过的路径被成功处理 | `/new-endpoint` 首次被请求并返回 200 |
+| `[URL] 新URL首次出现` | 学习期未见过的路径被成功处理 | `/new-endpoint` 首次被请求并返回 200（同一路径仅告警一次） |
 | `[URL] 新参数` | 已知路径携带学习期未见的参数名 | `/page?cmd=whoami`（仅 `lang` 在学习基线中） |
-| `[URL] 访问频率异常` | 最近 10 次访问速率 > 基线 5 倍 | 突发爬虫或 DoS 流量 |
+| `[URL] 参数值长度超阈值` | 参数值长度超过基线最大长度 × 阈值%（默认 150%） | 学习期 `?q=abcd`（长度 4）→ 检测期 `?q=<3KB_payload>`（长度 3072 > 4×150%） |
+| `[URL] 访问频率异常` | 最近 10 次访问速率 > 基线 1.5 倍 | 突发爬虫或 DoS 流量 |
 
 **关键约束**:
 - 4xx/5xx 响应不触发 URL 告警 — 扫描器 404 探测（`/wp-admin`、`/.env`）被静默过滤
@@ -413,8 +417,7 @@ chmod 755 /path/to/tomcat/logs/
 systemctl stop tomcat
 
 # 2. 备份旧版本
-cp /opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar \
-   /opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar.bak
+cp /opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar /opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar.bak
 
 # 3. 替换新版本
 cp new-version.jar /opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar
@@ -439,8 +442,7 @@ systemctl stop tomcat
 systemctl start tomcat
 
 # 或直接恢复备份版本
-cp /opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar.bak \
-   /opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar
+cp /opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar.bak /opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar
 ```
 
 ## 11. 安全注意事项
@@ -480,13 +482,13 @@ A: `StackFingerprint` 在构建时自动过滤 `com.defense.rasp.*` 和 `Thread.
 A: 在学习期内预编译所有 JSP。Tomcat 的 JDT 编译器类加载在学习期不产生告警。详见 `stack-anomaly-detector-deployment-guide.md` 的策略 C。
 
 **Q: URL 基线告警「新URL首次出现」是什么含义？**
-A: 学习期未访问过的路径在检测期首次被请求并返回 2xx/3xx 时触发。若为正常业务页面遗漏，需延长学习期重新部署。扫描器 404 探测（如 /wp-admin）不会触发此告警。
+A: 学习期未访问过的路径在检测期首次被请求并返回 2xx/3xx 时触发。同一路径仅告警一次，后续访问不再重复记录，避免日志刷屏。若为正常业务页面遗漏，需延长学习期重新部署。扫描器 404 探测（如 /wp-admin）不会触发此告警。
 
 **Q: 新参数告警是否会被扫描器触发？**
 A: 不会。新参数检测仅在响应为 2xx/3xx 时生效，即参数必须被后端实际处理。扫描器对任意路径的 `?id=1' OR '1'='1` 探测若返回 404 不告警。
 
 **Q: 如何查看学习到的 URL 基线？**
-A: 学习完成后生成的 `stack-anomaly-baseline-report.log` 包含「URL 基线」章节，列出所有学习到的路径、访问频次和参数名。也可通过告警日志中的 `[URL] URL基线学习完成` 行查看统计。
+A: 学习完成后生成的 `stack-anomaly-baseline-report.log` 包含「URL 基线」章节，列出所有学习到的路径、访问频次、参数名和参数值最大长度。也可通过告警日志中的 `[URL] URL基线学习完成` 行查看统计。
 
 **Q: 频率异常告警会产生告警风暴吗？**
 A: 不会。频率异常内置 30 秒冷却，同一路径每分钟最多产生 2 条告警。基线速率基于学习期访问次数计算，仅在当前速率超过基线 1.5 倍时触发（可通过 `url.freq.threshold` 启动参数或管理控制台调节）。
@@ -560,6 +562,79 @@ cp model-console.jsp $CATALINA_BASE/webapps/examples/model-console.jsp
 
 ---
 
-**版本**: 1.0.3  
-**更新日期**: 2026-07-01  
+## 15. 告警与模型结果外发 (Forwarding)
+
+### 15.1 概述
+
+支持将告警日志和模型学习结果通过 Syslog 或 Kafka 外发至第三方日志服务器（SIEM、RASP Server 等），便于集中管理和分析。
+
+### 15.2 消息格式
+
+外发消息为 JSON 格式，包含统一头部：
+
+```json
+{
+  "type": "alert | model",
+  "app": "应用实例标识",
+  "timestamp": "Unix毫秒时间戳"
+}
+```
+
+**告警消息**（`type=alert`）：
+- `level`: ALARM / BLOCK / WARN
+- `prefix`: 告警前缀（如 `[URL]`、`[CTPG]`、`[DangerousClass]`）
+- `message`: 完整告警内容
+
+**模型报告**（`type=model`）：
+- `ssf_count`: SSF 指纹数量
+- `ctpg_size`: CTPG 转移图节点数
+- `url_path_count`: URL 基线路径数
+- `url_total_requests`: URL 学习期总请求数
+- `ssf_fingerprints`: 指纹 JSON 数组
+- `ctpg_transitions`: 转移 JSON 数组
+- `url_paths`: URL 路径 JSON 数组
+
+### 15.3 使用示例
+
+```bash
+# Syslog 转发
+-javaagent:rasp.jar=forward.type=syslog,forward.app.name=order-service,forward.syslog.host=192.168.1.100,forward.syslog.port=514
+
+# 多实例部署（同一服务器）
+# 实例1: order-service
+-javaagent:rasp.jar=forward.type=syslog,forward.app.name=order-service,...
+
+# 实例2: payment-service
+-javaagent:rasp.jar=forward.type=syslog,forward.app.name=payment-service,...
+```
+
+### 15.4 发送时机
+
+- **告警**：产生后立即外发（ALARM / BLOCK / WARN 级别）
+- **模型报告**：每次学习完成后外发一次；重新学习后再次触发
+
+### 15.5 测试验证
+
+项目内置最小化 Syslog 接收器 `tools/syslog-receiver.py`，部署前可在测试环境验证外发功能。
+
+```bash
+# 步骤1: 启动 Syslog 接收器（终端1）
+python3 tools/syslog-receiver.py 514
+
+# 步骤2: 启动 Tomcat 并配置转发参数（终端2）
+export CATALINA_OPTS="-javaagent:/opt/tomcat85/stack-anomaly-detector.jar=forward.type=syslog,forward.app.name=my-test-app,forward.syslog.host=127.0.0.1,forward.syslog.port=514,debug.log=true"
+/opt/tomcat85/bin/catalina.sh run
+
+# 步骤3: 访问任意 URL 触发告警
+curl http://localhost:8080/examples/
+
+# 预期: 接收器终端输出
+#   [10:30:15] my-test-app [URL] 新URL首次出现: /examples
+#   [10:30:45] my-test-app MODEL: SSF=15 CTPG=83 URL=2
+```
+
+---
+
+**版本**: 1.1.0  
+**更新日期**: 2026-07-06  
 **构建**: `mvn clean package`

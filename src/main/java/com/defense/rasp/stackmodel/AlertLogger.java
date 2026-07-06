@@ -112,6 +112,7 @@ public class AlertLogger {
     public static void warn(String message) {
         String logMessage = formatMessage("WARN", message);
         writeToFile(logMessage);
+        forwardAlert("WARN", message);
     }
 
     public static void error(String message) {
@@ -125,12 +126,14 @@ public class AlertLogger {
         String logMessage = formatMessage("ALARM", message);
         System.out.println(logMessage);
         writeToFile(logMessage);
+        forwardAlert("ALARM", message);
     }
 
     /** block: 阻断告警，始终写入文件 */
     public static void block(String message) {
         String logMessage = formatMessage("BLOCK", message);
         writeToFile(logMessage);
+        forwardAlert("BLOCK", message);
     }
 
     private static String formatMessage(String level, String message) {
@@ -188,7 +191,26 @@ public class AlertLogger {
     public static void countHttpSkipped()   { infoSkipped("http", httpSkipped); }
     public static void countLearnSkipped()  { infoSkipped("learn", learnSkipped); }
 
+    private static void forwardAlert(String level, String message) {
+        try {
+            String prefix = extractPrefix(message);
+            com.defense.rasp.forward.ForwardManager.sendAlert(level, prefix, message);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static String extractPrefix(String message) {
+        if (message == null) return "";
+        int start = message.indexOf('[');
+        int end = message.indexOf(']');
+        if (start == 0 && end > start) {
+            return message.substring(start, end + 1);
+        }
+        return "";
+    }
+
     public static void close() {
+        try { com.defense.rasp.forward.ForwardManager.shutdown(); } catch (Exception ignored) {}
         LOCK.lock();
         try {
             if (writer != null) {
