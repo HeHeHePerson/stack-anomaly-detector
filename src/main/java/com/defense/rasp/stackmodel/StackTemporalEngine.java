@@ -78,7 +78,8 @@ public class StackTemporalEngine {
      * 栈签名指纹（SSF）
      * 将调用栈转换为可哈希的签名
      */
-    public static class StackFingerprint {
+    public static class StackFingerprint implements java.io.Serializable {
+        private static final long serialVersionUID = 20260706001L;
         public final String methodSignature;
         public final int fingerprintHash;
         public final List<String> methodSignatures;
@@ -120,7 +121,8 @@ public class StackTemporalEngine {
     /**
      * 转移节点（CTPG组成单元）
      */
-    public static class TransitionNode {
+    public static class TransitionNode implements java.io.Serializable {
+        private static final long serialVersionUID = 20260706002L;
         public final String sourceMethod;
         private final ConcurrentHashMap<String, Long> targetCounts;
         private long totalTransitions;

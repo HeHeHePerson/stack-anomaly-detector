@@ -73,6 +73,9 @@ curl -I http://localhost:8080/examples/
 | `forward.app.name` | `rasp-agent` | 应用实例标识。由用户自行指定一个能区分不同 Java Web 实例的名称，消费端据此识别日志来源。同一 Tomcat 下所有 webapps 共享该值 |
 | `forward.syslog.host` | `localhost` | Syslog 服务器地址 |
 | `forward.syslog.port` | `514` | Syslog 服务器 UDP 端口 |
+| `baseline.file` | `<系统临时目录>/rasp/baseline.dat` | 基线持久化文件路径。默认启用。设为 `none` 或 `false` 可禁用 |
+| `correlation.window` | `60` | 跨请求攻击关联的时间窗口（秒） |
+| `correlation.threshold` | `100` | 跨请求攻击关联的累计分数阈值 |
 
 ### 3.2 JVM 系统属性（-D 参数）
 
@@ -557,5 +560,66 @@ export CATALINA_OPTS="-javaagent:/opt/tomcat85/stack-anomaly-detector.jar=forwar
 
 ---
 
-**版本**: 1.1.0  
-**更新日期**: 2026-07-06
+## 11. 基线持久化
+
+### 11.1 启用
+
+默认启用（Linux: `/tmp/rasp/baseline.dat`，Windows: `%TMP%\rasp\baseline.dat`），无需额外配置。自定义路径或禁用：
+
+```bash
+# 自定义路径
+JAVA_OPTS="-javaagent:rasp.jar=baseline.file=/opt/rasp/my-baseline.dat,..."
+
+# 禁用
+JAVA_OPTS="-javaagent:rasp.jar=baseline.file=none,..."
+```
+
+### 11.2 操作验证
+
+```bash
+# 首次启动（无基线文件）→ 进入学习阶段
+[StackAnomalyDetector] 基线文件路径: /opt/rasp/baseline.dat
+[BaselineSerializer] 基线文件不存在，跳过加载: /opt/rasp/baseline.dat
+# ... 学习完成后 ...
+[BaselineSerializer] 基线已保存: /opt/rasp/baseline.dat SSF=150+320 CTPG=205 URL=15
+
+# 重启后 → 加载基线，跳过学习
+[BaselineSerializer] 基线已加载: /opt/rasp/baseline.dat SSF=470 CTPG=205 URL=15 (跳过学习，直接进入检测模式)
+```
+
+### 11.3 注意事项
+
+- 基线文件格式为 Java 序列化二进制，不可跨 JDK 主版本加载
+- 重新学习后旧文件被覆盖
+- 部署新版本时建议删除旧基线文件，让 Agent 重新学习
+
+---
+
+## 12. 跨请求攻击关联
+
+### 12.1 配置示例
+
+```bash
+# 默认配置（60s 窗口 / 100 分阈值）
+JAVA_OPTS="-javaagent:rasp.jar=correlation.window=60,correlation.threshold=100,..."
+
+# 高灵敏度配置（30s 窗口 / 50 分阈值）
+JAVA_OPTS="-javaagent:rasp.jar=correlation.window=30,correlation.threshold=50,..."
+```
+
+### 12.2 告警示例
+
+```
+[CORRELATION] IP 10.0.0.5 在 60s 内累计风险分数超过阈值 100
+```
+
+### 12.3 调优建议
+
+- 误报较多：提高 `correlation.threshold`（如 150）
+- 漏报较多：降低 `correlation.threshold`（如 50）或缩短 `correlation.window`（如 30）
+- 内网环境可调高阈值，外网环境可调低
+
+---
+
+**版本**: 1.2.0  
+**更新日期**: 2026-07-09

@@ -21,7 +21,8 @@ public class UrlBaselineModel {
     private static final AtomicLong TOTAL_URLS_LEARNED = new AtomicLong();
     private static volatile boolean learningComplete = false;
 
-    public static class UrlBaseline {
+    public static class UrlBaseline implements java.io.Serializable {
+        private static final long serialVersionUID = 20260706003L;
         public final String path;
         public final AtomicLong totalVisits = new AtomicLong();
         public final Set<String> paramKeys = ConcurrentHashMap.newKeySet();
@@ -226,6 +227,13 @@ public class UrlBaselineModel {
         }
         sb.append("\n");
         return sb.toString();
+    }
+
+    public static void restoreFrom(Map<String, UrlBaseline> baselines, long totalLearned) {
+        BASELINE.clear();
+        BASELINE.putAll(baselines);
+        TOTAL_URLS_LEARNED.set(totalLearned);
+        learningComplete = true;
     }
 
     public static void reset() {

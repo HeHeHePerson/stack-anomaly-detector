@@ -1,5 +1,6 @@
 package com.defense.rasp.agent;
 
+import java.io.File;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -35,7 +36,17 @@ public class AgentConfig {
     public static boolean isVerboseInfoEnabled() { return verboseInfoEnabled; }
 
     public static void parseArgs(String agentArgs) {
-        if (agentArgs == null || agentArgs.isEmpty()) return;
+        String defaultPath = getDefaultBaselinePath();
+        com.defense.rasp.stackmodel.BaselineLearningEngine.setBaselineFilePath(defaultPath);
+
+        if (agentArgs == null || agentArgs.isEmpty()) {
+            System.out.println("[StackAnomalyDetector] 基线文件路径(默认): " + defaultPath);
+            System.out.println("[StackAnomalyDetector] 配置加载完成 - 阻断模式: " + blockMode +
+                    ", 学习时长: " + learningDurationMs + "ms" +
+                    ", debug日志: " + debugLogEnabled +
+                    ", 详细INFO: " + verboseInfoEnabled);
+            return;
+        }
 
         Map<String, String> params = new HashMap<>();
         for (String pair : agentArgs.split("[,;]")) {
@@ -109,9 +120,54 @@ public class AgentConfig {
             com.defense.rasp.forward.ForwardManager.init(ft, app, host, port);
         }
 
+        if (params.containsKey("baseline.file")) {
+            String path = params.get("baseline.file");
+            if (path != null && !path.isEmpty() && !"none".equalsIgnoreCase(path) && !"false".equalsIgnoreCase(path)) {
+                com.defense.rasp.stackmodel.BaselineLearningEngine.setBaselineFilePath(path);
+                System.out.println("[StackAnomalyDetector] 基线文件路径: " + path);
+            } else {
+                com.defense.rasp.stackmodel.BaselineLearningEngine.setBaselineFilePath(null);
+                System.out.println("[StackAnomalyDetector] 基线持久化已禁用");
+            }
+        } else {
+            System.out.println("[StackAnomalyDetector] 基线文件路径(默认): " + defaultPath);
+        }
+
+        if (params.containsKey("correlation.window")) {
+            try {
+                int w = Integer.parseInt(params.get("correlation.window"));
+                if (w > 0) {
+                    com.defense.rasp.stackmodel.AttackCorrelationEngine.setWindowSeconds(w);
+                    System.out.println("[StackAnomalyDetector] 跨请求关联窗口: " + w + "s");
+                }
+            } catch (NumberFormatException ignored) {}
+        }
+
+        if (params.containsKey("correlation.threshold")) {
+            try {
+                int t = Integer.parseInt(params.get("correlation.threshold"));
+                if (t > 0) {
+                    com.defense.rasp.stackmodel.AttackCorrelationEngine.setScoreThreshold(t);
+                    System.out.println("[StackAnomalyDetector] 跨请求关联阈值: " + t);
+                }
+            } catch (NumberFormatException ignored) {}
+        }
+
         System.out.println("[StackAnomalyDetector] 配置加载完成 - 阻断模式: " + blockMode + 
                 ", 学习时长: " + learningDurationMs + "ms" +
                 ", debug日志: " + debugLogEnabled +
                 ", 详细INFO: " + verboseInfoEnabled);
+    }
+
+    private static String getDefaultBaselinePath() {
+        String tmpDir = System.getProperty("java.io.tmpdir");
+        if (tmpDir == null || tmpDir.isEmpty()) {
+            String os = System.getProperty("os.name", "").toLowerCase();
+            tmpDir = os.contains("win") ? "C:\\Windows\\Temp" : "/tmp";
+        }
+        if (tmpDir.endsWith(File.separator)) {
+            tmpDir = tmpDir.substring(0, tmpDir.length() - 1);
+        }
+        return tmpDir + File.separator + "rasp" + File.separator + "baseline.dat";
     }
 }

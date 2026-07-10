@@ -119,6 +119,9 @@ java -javaagent:/opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar -jar your-appl
 | `forward.app.name` | 任意字符串 | `rasp-agent` | 应用实例标识。由用户自行指定一个能区分不同 Java Web 实例的名称，同一 Tomcat 下所有 webapps 共享该值。消费端据此识别告警/模型报告来自哪个实例（如 `order-service-prod`、`payment-tomcat-01`） |
 | `forward.syslog.host` | IP/主机名 | `localhost` | Syslog 服务器地址 |
 | `forward.syslog.port` | 1-65535 | `514` | Syslog 服务器 UDP 端口 |
+| `baseline.file` | 文件路径 | `<系统临时目录>/rasp/baseline.dat` | 基线持久化文件路径。Linux 默认 `/tmp/rasp/baseline.dat`，Windows 默认 `%TMP%\rasp\baseline.dat`。设为 `none` 或 `false` 可禁用持久化 |
+| `correlation.window` | 正整数 | `60` | 跨请求攻击关联的时间窗口（秒）。同一 IP 在该窗口内的风险分数累积计算 |
+| `correlation.threshold` | 正整数 | `100` | 跨请求攻击关联的累计分数阈值。当窗口内累计分数超过此值时触发 `[CORRELATION]` 告警 |
 
 **JVM 系统属性**：
 | 参数 | 默认值 | 说明 |
@@ -635,6 +638,101 @@ curl http://localhost:8080/examples/
 
 ---
 
-**版本**: 1.1.0  
-**更新日期**: 2026-07-06  
+## 16. 基线持久化
+
+### 16.1 功能说明
+
+学习完成后将 SSF 指纹、CTPG 转移图、URL 基线序列化到本地文件，重启时加载以跳过学习阶段，消除每次滚动发布后的 5 分钟盲区。
+
+### 16.2 启用方式
+
+默认启用，无需额外配置。基线文件路径：
+
+| 平台 | 默认路径 |
+|------|---------|
+| Linux | `/tmp/rasp/baseline.dat` |
+| Windows | `%TMP%\rasp\baseline.dat`（通常为 `C:\Users\<用户>\AppData\Local\Temp\rasp\baseline.dat`） |
+
+```bash
+# 使用默认路径（无需指定 baseline.file）
+JAVA_OPTS="-javaagent:rasp.jar=..."
+
+# 自定义路径
+JAVA_OPTS="-javaagent:rasp.jar=baseline.file=/opt/rasp/my-baseline.dat,..."
+
+# 禁用持久化
+JAVA_OPTS="-javaagent:rasp.jar=baseline.file=none,..."
+```
+
+### 16.3 工作机制
+
+- **保存时机**：学习完成后自动保存（monitor 线程 / learnNormalStack 超时 / detectAnomalyInternal 超时 / forceLearningComplete）
+- **加载时机**：Agent 启动初始化学习引擎后立即尝试加载
+- **文件不存在**：正常启动学习阶段（控制台输出"基线文件不存在，跳过加载"）
+- **文件存在**：加载基线数据，跳过学习阶段，直接进入检测模式（控制台输出"基线已加载，跳过学习阶段"）
+- **重学触发**：通过管理控制台"重新学习"后，旧基线被清除，新学习完成后再次保存覆盖
+
+### 16.4 存储格式
+
+Java 序列化二进制格式，包含：
+- SSF 启动期/运行期指纹集合（哈希值）
+- SSF 指纹对象集合（用于 LCS 相似度计算）
+- SSF 指纹频率映射
+- CTPG 转移图（源方法 → TransitionNode）
+- URL 基线数据（路径 → UrlBaseline，含参数键、参数值最大长度、访问次数）
+
+---
+
+## 17. 跨请求攻击关联
+
+### 17.1 功能说明
+
+按客户端 IP 在时间窗口内累积风险分数，当累计分数超过阈值时触发 `[CORRELATION]` 告警。攻击者无法通过将攻击操作拆分到多次请求中来规避检测。
+
+### 17.2 启用方式
+
+```bash
+# 默认启用（60s 窗口 / 100 分阈值）
+JAVA_OPTS="-javaagent:rasp.jar=correlation.window=60,correlation.threshold=100,..."
+
+# 调高阈值减少误报
+JAVA_OPTS="-javaagent:rasp.jar=correlation.window=60,correlation.threshold=150,..."
+
+# 缩窄窗口提高灵敏度
+JAVA_OPTS="-javaagent:rasp.jar=correlation.window=30,correlation.threshold=80,..."
+```
+
+### 17.3 工作机制
+
+```
+请求1: IP=10.0.0.5, 文件读取告警 (score=30)
+  → 窗口累计=30, 未达阈值
+
+请求2: IP=10.0.0.5, 敏感文件访问 (score=60)  
+  → 窗口累计=90, 未达阈值
+
+请求3: IP=10.0.0.5, 命令执行告警 (score=40)
+  → 窗口累计=130, 超过阈值 100!
+  → [CORRELATION] IP 10.0.0.5 在 60s 内累计风险分数超过阈值 100
+  → 窗口重置
+```
+
+### 17.4 计分触发点
+
+所有通过 TemporalGuard 的 alarm/block 决策点均计入关联：
+- 文件读取/写入/删除异常（SSF + CTPG + 敏感文件分数）
+- 命令执行异常
+- 反射调用检测
+- 敏感目录列举
+
+不在 HTTP 请求上下文（无 RemoteAddr）中的操作不计入关联。
+
+### 17.5 与单个告警的关系
+
+跨请求关联告警是**追加性**的：触发 `[CORRELATION]` 后仍会继续输出每次单独的 `[TemporalGuard]` / `[URL]` 等告警。关联告警表明存在攻击者 IP 级别的可疑行为模式。
+
+---
+
+**版本**: 1.2.0  
+**更新日期**: 2026-07-09  
 **构建**: `mvn clean package`

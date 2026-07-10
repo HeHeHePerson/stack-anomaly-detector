@@ -859,6 +859,78 @@ BaselineLearningEngine.finishLearning()
 | 警告 (WARN) | 即时外发（含学习完成通知） |
 | 模型报告 | 学习完成后外发一次，重新学习后再次触发 |
 
+## 12. 基线持久化
+
+### 12.1 概述
+
+学习完成时，将 SSF 指纹集合、CTPG 转移图、URL 基线序列化为二进制文件，重启后自动加载并跳过学习阶段。
+
+### 12.2 保存时机
+
+- 学习监控线程检测到学习时长已到（每 30s 检查）
+- `learnNormalStack()` 内部超时检测
+- `detectAnomalyInternal()` 内部超时检测
+- 管理控制台手动结束学习（`forceLearningComplete()`）
+
+### 12.3 存储内容
+
+| 数据 | 类型 | 说明 |
+|------|------|------|
+| 启动期指纹哈希 | `Set<Integer>` | JVM 启动后 120s 内学习的指纹 |
+| 运行期指纹哈希 | `Set<Integer>` | 运行阶段的指纹 |
+| 指纹对象 | `Set<StackFingerprint>` | 完整指纹对象（用于 LCS 相似度计算） |
+| 指纹频率 | `Map<Integer, Long>` | 每个指纹的学习次数 |
+| CTPG 转移图 | `Map<String, TransitionNode>` | 源方法 → TransitionNode |
+| URL 基线 | `Map<String, UrlBaseline>` | 路径 → UrlBaseline（含参数键/值长度） |
+
+**格式**：Java `ObjectOutputStream` 序列化，不可跨 JDK 主版本加载。
+
 ---
-**版本**: 1.1.0  
-**更新日期**: 2026-07-06
+
+## 13. 跨请求攻击关联
+
+### 13.1 设计
+
+`AttackCorrelationEngine` 按客户端 IP 维护滑动时间窗口，累积同一 IP 的所有风险分数。当窗口内累计值超过阈值时，输出 `[CORRELATION]` 告警。
+
+### 13.2 数据结构
+
+```
+ConcurrentHashMap<String, WindowState>
+  WindowState: { windowStart, totalScore }
+```
+
+- **key**：客户端 IP（从 `HttpServletRequest.getRemoteAddr()` 获取）
+- **windowStart**：窗口起始时间（epoch ms）
+- **totalScore**：窗口内累计风险分数
+
+### 13.3 窗口逻辑
+
+1. 每次 alarm/block 决策后，调用 `AttackCorrelationEngine.recordScore(remoteAddr, score)`
+2. 若窗口不存在或已过期（当前时间 - windowStart > windowSeconds），创建新窗口
+3. 否则累加分数
+4. 若 totalScore >= scoreThreshold，输出 `[CORRELATION]` 告警并重置窗口（移除该 IP 的 WindowState）
+
+### 13.4 触发点
+
+所有 `TemporalGuard` 中的 alarm/block 决策均计入，包含：
+- SSF 异常指纹 / 低 LCS 相似度
+- CTPG 未知转移 / 低概率转移
+- TTT 异常轨迹
+- 敏感文件/目录访问
+- 命令执行风险评分
+- 反射检测
+
+不在 HTTP 请求上下文中（无 `RemoteAddr`）的操作不计入关联。
+
+### 13.5 参数
+
+| 参数 | 默认值 | 说明 |
+|------|-------|------|
+| `correlation.window` | `60` | 时间窗口（秒） |
+| `correlation.threshold` | `100` | 累计分数阈值 |
+
+---
+
+**版本**: 1.2.0  
+**更新日期**: 2026-07-09

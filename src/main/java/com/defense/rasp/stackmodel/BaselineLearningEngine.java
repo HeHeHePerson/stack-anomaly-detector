@@ -53,6 +53,7 @@ public class BaselineLearningEngine {
                             totalFingerprints + " 转移图大小=" + graphSize);
                     generateReportIfNeeded();
                     forwardModelReport();
+                    saveBaseline();
                 }
             }
         }, 30, 30, TimeUnit.SECONDS);
@@ -68,6 +69,7 @@ public class BaselineLearningEngine {
             AlertLogger.warn("[BaselineLearning] 基线学习完成，进入检测模式");
             generateReportIfNeeded();
             forwardModelReport();
+            saveBaseline();
             return;
         }
 
@@ -115,6 +117,7 @@ public class BaselineLearningEngine {
                 UrlBaselineModel.finishLearning();
                 AlertLogger.warn("[BaselineLearning] 基线学习完成，进入检测模式");
                 forwardModelReport();
+                saveBaseline();
             } else {
                 learnNormalStack(stack, elapsed < STARTUP_PERIOD_MS);
                 return 0;
@@ -291,6 +294,7 @@ public class BaselineLearningEngine {
             UrlBaselineModel.finishLearning();
             AlertLogger.warn("[ModelMgmt] 学习阶段被手动结束");
             forwardModelReport();
+            saveBaseline();
             return true;
         }
         return false;
@@ -379,6 +383,101 @@ public class BaselineLearningEngine {
                 fCount, gSize, urlCount, urlTotal);
         } catch (Exception ex) {
             System.err.println("[ForwardManager] 模型报告构建失败: " + ex.getMessage());
+        }
+    }
+
+    private static String baselineFilePath = null;
+
+    public static void setBaselineFilePath(String path) {
+        baselineFilePath = path;
+    }
+
+    public static String getBaselineFilePath() {
+        return baselineFilePath;
+    }
+
+    public static void saveBaseline() {
+        if (baselineFilePath == null || baselineFilePath.isEmpty()) return;
+        java.io.ObjectOutputStream oos = null;
+        try {
+            Map<Integer, Long> fpFreqs = new HashMap<>(FINGERPRINT_FREQUENCIES);
+            Set<Integer> startupFps = new HashSet<>(NORMAL_STARTUP_FINGERPRINTS);
+            Set<Integer> runtimeFps = new HashSet<>(NORMAL_RUNTIME_FINGERPRINTS);
+            Set<StackTemporalEngine.StackFingerprint> fpObjs = new HashSet<>(FINGERPRINT_OBJECTS);
+            Map<String, StackTemporalEngine.TransitionNode> graph = new HashMap<>(StackTemporalEngine.TRANSITION_GRAPH);
+            Map<String, UrlBaselineModel.UrlBaseline> urlBls = new HashMap<>(UrlBaselineModel.getBaselineEntries());
+            long totalUrl = UrlBaselineModel.getTotalUrlsLearned();
+
+            java.io.File f = new java.io.File(baselineFilePath);
+            if (f.getParentFile() != null) f.getParentFile().mkdirs();
+            oos = new java.io.ObjectOutputStream(new java.io.FileOutputStream(f));
+            oos.writeObject(startupFps);
+            oos.writeObject(runtimeFps);
+            oos.writeObject(fpObjs);
+            oos.writeObject(fpFreqs);
+            oos.writeObject(graph);
+            oos.writeObject(urlBls);
+            oos.writeLong(totalUrl);
+            oos.writeLong(LEARNING_DURATION_MS);
+            oos.writeLong(STARTUP_PERIOD_MS);
+            oos.flush();
+            AlertLogger.warn("[BaselineSerializer] 基线已保存: " + baselineFilePath
+                + " SSF=" + startupFps.size() + "+" + runtimeFps.size()
+                + " CTPG=" + graph.size() + " URL=" + urlBls.size());
+        } catch (Exception e) {
+            System.err.println("[BaselineSerializer] 基线保存失败: " + e.getMessage());
+            e.printStackTrace();
+        } finally {
+            if (oos != null) { try { oos.close(); } catch (Exception ignored) {} }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public static boolean loadBaseline(String path) {
+        java.io.File f = new java.io.File(path);
+        if (!f.exists()) {
+            System.out.println("[BaselineSerializer] 基线文件不存在，跳过加载: " + path);
+            return false;
+        }
+        java.io.ObjectInputStream ois = null;
+        try {
+            ois = new java.io.ObjectInputStream(new java.io.FileInputStream(f));
+            Set<Integer> startupFps = (Set<Integer>) ois.readObject();
+            Set<Integer> runtimeFps = (Set<Integer>) ois.readObject();
+            Set<StackTemporalEngine.StackFingerprint> fpObjs = (Set<StackTemporalEngine.StackFingerprint>) ois.readObject();
+            Map<Integer, Long> fpFreqs = (Map<Integer, Long>) ois.readObject();
+            Map<String, StackTemporalEngine.TransitionNode> graph = (Map<String, StackTemporalEngine.TransitionNode>) ois.readObject();
+            Map<String, UrlBaselineModel.UrlBaseline> urlBls = (Map<String, UrlBaselineModel.UrlBaseline>) ois.readObject();
+            long totalUrl = ois.readLong();
+            long savedLearnDuration = ois.readLong();
+            long savedStartupPeriod = ois.readLong();
+
+            NORMAL_STARTUP_FINGERPRINTS.clear();
+            NORMAL_STARTUP_FINGERPRINTS.addAll(startupFps);
+            NORMAL_RUNTIME_FINGERPRINTS.clear();
+            NORMAL_RUNTIME_FINGERPRINTS.addAll(runtimeFps);
+            FINGERPRINT_OBJECTS.clear();
+            FINGERPRINT_OBJECTS.addAll(fpObjs);
+            FINGERPRINT_FREQUENCIES.clear();
+            FINGERPRINT_FREQUENCIES.putAll(fpFreqs);
+            StackTemporalEngine.TRANSITION_GRAPH.clear();
+            StackTemporalEngine.TRANSITION_GRAPH.putAll(graph);
+            UrlBaselineModel.restoreFrom(urlBls, totalUrl);
+
+            isLearningPhase = false;
+            LEARNING_START_TIME = System.currentTimeMillis();
+            AlertLogger.warn("[BaselineSerializer] 基线已加载: " + path
+                + " SSF=" + (startupFps.size() + runtimeFps.size())
+                + " CTPG=" + graph.size() + " URL=" + urlBls.size()
+                + " (跳过学习，直接进入检测模式)");
+            System.out.println("[StackAnomalyDetector] 基线已从文件加载，跳过学习阶段");
+            return true;
+        } catch (Exception e) {
+            System.err.println("[BaselineSerializer] 基线加载失败: " + e.getMessage());
+            e.printStackTrace();
+            return false;
+        } finally {
+            if (ois != null) { try { ois.close(); } catch (Exception ignored) {} }
         }
     }
 

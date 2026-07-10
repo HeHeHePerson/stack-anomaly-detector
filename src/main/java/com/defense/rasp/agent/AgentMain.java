@@ -85,6 +85,7 @@ public class AgentMain {
         try {
             // Initialize Learning Engine first
             initializeLearningEngine();
+            tryLoadBaseline();
             
             // 延迟安装 SecurityManager，避免干扰 Tomcat 启动
             if (Boolean.parseBoolean(System.getProperty("rasp.sm.immediate", "false"))) {
@@ -131,6 +132,13 @@ public class AgentMain {
             System.err.println("[StackAnomalyDetector] 学习引擎初始化异常: " + e.getMessage());
             e.printStackTrace();
         }
+    }
+
+    private static void tryLoadBaseline() {
+        String path = com.defense.rasp.stackmodel.BaselineLearningEngine.getBaselineFilePath();
+        if (path == null || path.isEmpty()) return;
+        System.out.println("[StackAnomalyDetector] 尝试加载基线文件: " + path);
+        com.defense.rasp.stackmodel.BaselineLearningEngine.loadBaseline(path);
     }
 
     private static void processLoadedClasses(Instrumentation inst, TemporalStackTransformer transformer) {

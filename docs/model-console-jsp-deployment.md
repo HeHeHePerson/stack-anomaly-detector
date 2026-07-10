@@ -138,7 +138,16 @@ JSP 页面通过 `HttpServlet.service()` Hook 注入的上下文访问以下 Jav
 | 页面空白/500 错误 | Jasper 编译失败 | 检查日志，确认 JSP 语法正确，无 lambda 表达式 |
 | ClassNotFoundException | Agent jar 未加载到系统 classloader | 确认使用 javaagent 而非 tomcat classpath 加载 |
 
+## 9. 基线持久化说明
+
+基线持久化默认启用，文件路径为系统临时目录下的 `rasp/baseline.dat`（Linux: `/tmp/rasp/baseline.dat`，Windows: `%TMP%\rasp\baseline.dat`）。
+
+学习完成后基线自动保存。重启时 Agent 自动加载并跳过学习阶段。通过 `baseline.file=none` 可禁用，通过 `baseline.file=<路径>` 可自定义。
+
+管理控制台中的"重新学习"操作会清除基线并触发新一轮学习，完成后自动覆盖持久化文件。
+
 ---
 
-**版本**: 1.0.1  
+**版本**: 1.1.0  
+**更新日期**: 2026-07-09
 **更新日期**: 2026-07-01

@@ -76,12 +76,13 @@ public class TemporalGuard {
         if (isSensitiveDirectory(dirPath)) {
             anomalyScore += 30;
             AlertLogger.alarm("[SensitiveDir] 检测到敏感目录列举: " + dirPath);
+            checkCorrelation(20);
         }
         
         if (anomalyScore >= HIGH_RISK_THRESHOLD) {
-            block("高风险目录列举: 分数=" + anomalyScore + ", 目录=" + dirPath, stack);
+            block("高风险目录列举: 目录=" + dirPath, anomalyScore, stack);
         } else if (anomalyScore >= MEDIUM_RISK_THRESHOLD) {
-            alarm("中风险目录列举: 分数=" + anomalyScore + ", 目录=" + dirPath, stack);
+            alarm("中风险目录列举: 目录=" + dirPath, anomalyScore, stack);
         }
     }
 
@@ -129,9 +130,9 @@ public class TemporalGuard {
         anomalyScore += analyzeFileSensitivity(filePath);
 
         if (anomalyScore >= HIGH_RISK_THRESHOLD) {
-            block("高风险时空异常: 分数=" + anomalyScore + ", 文件=" + filePath, stack);
+            block("高风险时空异常: 文件=" + filePath, anomalyScore, stack);
         } else if (anomalyScore >= MEDIUM_RISK_THRESHOLD) {
-            alarm("中风险时空异常: 分数=" + anomalyScore + ", 文件=" + filePath, stack);
+            alarm("中风险时空异常: 文件=" + filePath, anomalyScore, stack);
         } else {
             AlertLogger.countReadSkipped();
         }
@@ -165,9 +166,9 @@ public class TemporalGuard {
         score += analyzeFileSensitivity(filePath);
         
         if (score >= HIGH_RISK_THRESHOLD) {
-            block("高风险文件写入: 分数=" + score + ", 文件=" + filePath, stack);
+            block("高风险文件写入: 文件=" + filePath, score, stack);
         } else if (score >= MEDIUM_RISK_THRESHOLD) {
-            alarm("中风险文件写入: 分数=" + score + ", 文件=" + filePath, stack);
+            alarm("中风险文件写入: 文件=" + filePath, score, stack);
         } else {
             AlertLogger.countWriteSkipped();
         }
@@ -201,9 +202,9 @@ public class TemporalGuard {
         score += analyzeFileSensitivity(filePath);
         
         if (score >= HIGH_RISK_THRESHOLD) {
-            block("高风险文件删除: 分数=" + score + ", 文件=" + filePath, stack);
+            block("高风险文件删除: 文件=" + filePath, score, stack);
         } else if (score >= MEDIUM_RISK_THRESHOLD) {
-            alarm("中风险文件删除: 分数=" + score + ", 文件=" + filePath, stack);
+            alarm("中风险文件删除: 文件=" + filePath, score, stack);
         } else {
             AlertLogger.countDeleteSkipped();
         }
@@ -211,6 +212,7 @@ public class TemporalGuard {
 
     // 延迟学习：在 beforeService 记录 URI，afterService 根据响应状态决定是否学习
     private static final ThreadLocal<String> PENDING_REQUEST_URI = new ThreadLocal<>();
+    private static final ThreadLocal<String> REMOTE_ADDR = new ThreadLocal<>();
 
     public static void beforeService(Object req) {
         AlertLogger.debug("[TemporalGuard] beforeService 被调用");
@@ -227,6 +229,12 @@ public class TemporalGuard {
             } catch (Exception ignored) {
             }
             PENDING_REQUEST_URI.set(uri);
+            try {
+                java.lang.reflect.Method rm = req.getClass().getMethod("getRemoteAddr");
+                String addr = (String) rm.invoke(req);
+                if (addr != null) REMOTE_ADDR.set(addr);
+            } catch (Exception ignored) {
+            }
             AlertLogger.debug("[TemporalGuard] beforeService URI: " + uri);
         } catch (Exception e) {
             AlertLogger.debug("[TemporalGuard] beforeService 失败: " + e.getMessage());
@@ -236,6 +244,7 @@ public class TemporalGuard {
     public static void afterService(Object req, Object res) {
         String uri = PENDING_REQUEST_URI.get();
         PENDING_REQUEST_URI.remove();
+        REMOTE_ADDR.remove();
         if (uri == null) return;
 
         int status = -1;
@@ -285,13 +294,14 @@ public class TemporalGuard {
             }
             
             AlertLogger.alarm("[ReflectDetector] 检测到敏感方法的反射调用: " + fullSignature);
+            checkCorrelation(20);
             StackTraceElement[] stack = Thread.currentThread().getStackTrace();
             int anomalyScore = BaselineLearningEngine.detectAnomaly(stack, null);
             
             if (anomalyScore >= HIGH_RISK_THRESHOLD) {
-                block("高风险反射调用: 分数=" + anomalyScore + ", 方法=" + fullSignature, stack);
+                block("高风险反射调用: 方法=" + fullSignature, anomalyScore, stack);
             } else if (anomalyScore >= MEDIUM_RISK_THRESHOLD) {
-                alarm("中风险反射调用: 分数=" + anomalyScore + ", 方法=" + fullSignature, stack);
+                alarm("中风险反射调用: 方法=" + fullSignature, anomalyScore, stack);
             }
         }
     }
@@ -326,9 +336,9 @@ public class TemporalGuard {
         int anomalyScore = BaselineLearningEngine.detectAnomaly(stack, null) + analyzeCommand(command);
 
         if (anomalyScore >= HIGH_RISK_THRESHOLD) {
-            block("高风险命令执行: 分数=" + anomalyScore + ", 命令=" + command, stack);
+            block("高风险命令执行: 命令=" + command, anomalyScore, stack);
         } else if (anomalyScore >= MEDIUM_RISK_THRESHOLD) {
-            alarm("中风险命令执行: 分数=" + anomalyScore + ", 命令=" + command, stack);
+            alarm("中风险命令执行: 命令=" + command, anomalyScore, stack);
         } else {
             AlertLogger.countExecSkipped();
         }
@@ -458,21 +468,34 @@ public class TemporalGuard {
         return false;
     }
 
-    private static void block(String reason, StackTraceElement[] stack) {
+    private static void block(String reason, int score, StackTraceElement[] stack) {
         com.defense.rasp.agent.AgentConfig.BlockMode mode = 
                 com.defense.rasp.agent.AgentConfig.getBlockMode();
         
         if (mode == com.defense.rasp.agent.AgentConfig.BlockMode.BLOCK) {
             AlertLogger.block("[TemporalGuard] " + reason);
             AlertLogger.error("[TemporalGuard] 调用栈:\n" + formatStack(stack));
+            checkCorrelation(score);
             throw new SecurityException("[TemporalGuard] 阻断异常调用: " + reason);
         } else {
             AlertLogger.alarm("[MONITOR-ONLY] " + reason + " (仅告警模式)");
+            checkCorrelation(score);
         }
     }
 
-    private static void alarm(String reason, StackTraceElement[] stack) {
+    private static void alarm(String reason, int score, StackTraceElement[] stack) {
         AlertLogger.alarm("[TemporalGuard] " + reason);
+        checkCorrelation(score);
+    }
+
+    private static void checkCorrelation(int score) {
+        String remoteAddr = REMOTE_ADDR.get();
+        if (remoteAddr == null || score <= 0) return;
+        if (AttackCorrelationEngine.recordScore(remoteAddr, score)) {
+            AlertLogger.warn("[CORRELATION] IP " + remoteAddr
+                + " 在 " + AttackCorrelationEngine.getWindowSeconds() + "s 内累计风险分数超过阈值 "
+                + AttackCorrelationEngine.getScoreThreshold());
+        }
     }
 
     private static String formatStack(StackTraceElement[] stack) {
