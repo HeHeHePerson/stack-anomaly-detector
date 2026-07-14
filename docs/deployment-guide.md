@@ -122,6 +122,9 @@ java -javaagent:/opt/rasp/stack-anomaly-detector-1.0.0-shaded.jar -jar your-appl
 | `baseline.file` | 文件路径 | `<系统临时目录>/rasp/baseline.dat` | 基线持久化文件路径。Linux 默认 `/tmp/rasp/baseline.dat`，Windows 默认 `%TMP%\rasp\baseline.dat`。设为 `none` 或 `false` 可禁用持久化 |
 | `correlation.window` | 正整数 | `60` | 跨请求攻击关联的时间窗口（秒）。同一 IP 在该窗口内的风险分数累积计算 |
 | `correlation.threshold` | 正整数 | `100` | 跨请求攻击关联的累计分数阈值。当窗口内累计分数超过此值时触发 `[CORRELATION]` 告警 |
+| `fp.ban.threshold` | 正整数 | `10` | 指纹封禁阈值。同一浏览器指纹在 `fp.ban.window` 秒内触发阻断的次数达到此值时，封禁该指纹 |
+| `fp.ban.window` | 正整数 | `60` | 指纹攻击历史滑动窗口（秒）。仅统计该窗口内的攻击次数 |
+| `fp.ban.duration` | 正整数 | `300` | 指纹封禁时长（秒）。超过此时长后封禁自动过期 |
 
 **JVM 系统属性**：
 | 参数 | 默认值 | 说明 |
@@ -733,6 +736,115 @@ JAVA_OPTS="-javaagent:rasp.jar=correlation.window=30,correlation.threshold=80,..
 
 ---
 
-**版本**: 1.2.0  
-**更新日期**: 2026-07-09  
+## 18. 浏览器指纹封禁机制
+
+### 18.1 功能说明
+
+通过嵌入在友好拦截页面中的 Canvas JS 脚本采集浏览器指纹，基于指纹追踪和封禁恶意客户端。当同一浏览器指纹在滑动时间窗口内触发阻断的次数达到阈值时，自动封禁该指纹一段时长，后续来自该指纹的所有请求直接返回友好拦截页面。
+
+### 18.2 指纹采集
+
+用户被阻断后，系统返回的友好拦截页面中嵌入了 Canvas JavaScript 脚本（`X-RASP-FP` Cookie）：
+
+```
+客户端被阻断 → 返回友好拦截页面（含 Canvas 指纹 JS）
+  → 浏览器执行 Canvas 指纹脚本
+  → 生成浏览器指纹 → 写入 X-RASP-FP Cookie
+  → 后续请求自动携带 Cookie
+```
+
+### 18.3 启用方式
+
+默认启用，无需额外配置。可通过以下参数调整行为：
+
+```bash
+# 默认配置（阈值 10 次 / 60s 窗口 / 封禁 300s）
+JAVA_OPTS="-javaagent:rasp.jar=..."
+
+# 严格模式（阈值 5 次 / 30s 窗口 / 封禁 600s）
+JAVA_OPTS="-javaagent:rasp.jar=fp.ban.threshold=5;fp.ban.window=30;fp.ban.duration=600,..."
+
+# 调高阈值减少误封
+JAVA_OPTS="-javaagent:rasp.jar=fp.ban.threshold=20;fp.ban.window=120;fp.ban.duration=600,..."
+```
+
+### 18.4 工作机制
+
+```
+请求1: 指纹=abc123, 文件读取操作被阻断 → 记录攻击时间戳
+  → 窗口内攻击次数: 1, 未达封禁阈值 10
+
+请求2: 指纹=abc123, 命令执行操作被阻断 → 记录攻击时间戳
+  → 窗口内攻击次数: 2, 未达封禁阈值 10
+
+...（持续攻击）...
+
+请求10: 指纹=abc123, 敏感文件读取被阻断 → 记录攻击时间戳
+  → 窗口内攻击次数: 10, 达到封禁阈值!
+  → 将指纹 abc123 加入封禁列表，过期时间 = 当前时间 + 300s
+  → 窗口重置
+
+请求11: 指纹=abc123 → Cookie 中读取到该指纹
+  → 检查封禁列表: abc123 在列表中且未过期!
+  → 抛出 SecurityException → afterService 返回友好拦截页面
+  → [FP_BAN] 拦截已封禁指纹 abc123，剩余封禁时间 295 秒
+```
+
+### 18.5 封禁前后的请求处理流程
+
+**封禁前（记录阶段）**：
+
+```
+请求 → beforeService: 从 X-RASP-FP Cookie 读取指纹
+  → 检测到攻击 → block() 调用 recordFingerprintAttack(fingerprint)
+  → FingerprintBanEngine.recordAttack(fingerprint):
+      1. 清理过期攻击记录（移除窗口外的旧时间戳）
+      2. 追加当前时间戳到攻击历史
+      3. 计算窗口内攻击次数
+      4. 若达到 fp.ban.threshold → 加入封禁列表（banExpiry = now + fp.ban.duration）
+  → 正常执行 block 逻辑（抛出异常或仅告警）
+```
+
+**封禁后（拦截阶段）**：
+
+```
+请求 → beforeService: 从 X-RASP-FP Cookie 读取指纹
+  → FingerprintBanEngine.isBanned(fingerprint) → true!
+  → 抛出 SecurityException("Browser fingerprint banned")
+  → afterService: 捕获 SecurityException → 返回友好拦截页面（含 Canvas 指纹 JS）
+```
+
+### 18.6 清理机制
+
+系统内置清理线程，每 60 秒执行一次过期数据清理：
+
+- 清除过期的攻击历史（超过 `fp.ban.window` 的旧时间戳）
+- 清除已过期的封禁条目（当前时间 > banExpiry）
+- 避免内存中积累大量历史数据
+
+### 18.7 日志示例
+
+**触发封禁**：
+
+```
+[BLOCK] [TemporalGuard] 高风险文件读取: 分数=65, 文件=/etc/shadow
+[FP_BAN] 指纹 1a2b3c4d 在 60s 内攻击次数达到阈值 10，封禁 300 秒
+```
+
+**拦截已封禁请求**：
+
+```
+[FP_BAN] 拦截已封禁指纹 1a2b3c4d，剩余封禁时间 185 秒
+```
+
+**封禁过期**：
+
+```
+[FP_BAN] 指纹 1a2b3c4d 封禁已过期，自动解除
+```
+
+---
+
+**版本**: 1.3.0  
+**更新日期**: 2026-07-12  
 **构建**: `mvn clean package`

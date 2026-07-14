@@ -157,6 +157,10 @@ public class StackTemporalEngine {
             return totalTransitions;
         }
 
+        public ConcurrentHashMap<String, Long> getTargetCounts() {
+            return targetCounts;
+        }
+
         /**
          * 获取所有目标方法及其概率
          */

@@ -76,6 +76,9 @@ curl -I http://localhost:8080/examples/
 | `baseline.file` | `<系统临时目录>/rasp/baseline.dat` | 基线持久化文件路径。默认启用。设为 `none` 或 `false` 可禁用 |
 | `correlation.window` | `60` | 跨请求攻击关联的时间窗口（秒） |
 | `correlation.threshold` | `100` | 跨请求攻击关联的累计分数阈值 |
+| `fp.ban.threshold` | `10` | 指纹封禁阈值。同一浏览器指纹在 `fp.ban.window` 秒内触发阻断的次数达到此值时，封禁该指纹 |
+| `fp.ban.window` | `60` | 指纹攻击历史滑动窗口（秒）。仅统计该窗口内的攻击次数 |
+| `fp.ban.duration` | `300` | 指纹封禁时长（秒）。超过此时长后封禁自动过期 |
 
 ### 3.2 JVM 系统属性（-D 参数）
 
@@ -621,5 +624,47 @@ JAVA_OPTS="-javaagent:rasp.jar=correlation.window=30,correlation.threshold=50,..
 
 ---
 
-**版本**: 1.2.0  
-**更新日期**: 2026-07-09
+## 13. 浏览器指纹封禁
+
+### 13.1 功能说明
+
+当同一浏览器指纹在时间窗口内多次触发阻断时，系统自动封禁该指纹，后续来自该指纹的所有请求直接返回友好拦截页面。
+
+### 13.2 配置示例
+
+```bash
+# 默认配置（10 次 / 60s 窗口 / 封禁 300s）
+JAVA_OPTS="-javaagent:rasp.jar=fp.ban.threshold=10;fp.ban.window=60;fp.ban.duration=300,..."
+
+# 严格模式
+JAVA_OPTS="-javaagent:rasp.jar=fp.ban.threshold=5;fp.ban.window=30;fp.ban.duration=600,..."
+
+# 宽松模式
+JAVA_OPTS="-javaagent:rasp.jar=fp.ban.threshold=20;fp.ban.window=120;fp.ban.duration=180,..."
+```
+
+### 13.3 告警示例
+
+```
+[FP_BAN] 指纹 1a2b3c4d 在 60s 内攻击次数达到阈值 10，封禁 300 秒
+[FP_BAN] 拦截已封禁指纹 1a2b3c4d，剩余封禁时间 185 秒
+```
+
+### 13.4 指纹采集方式
+
+用户被阻断后返回的友好拦截页面中嵌入 Canvas JavaScript 脚本，通过 Canvas 指纹技术生成浏览器指纹并写入 `X-RASP-FP` Cookie，后续请求自动携带。
+
+### 13.5 清理机制
+
+内置清理线程每 60 秒执行一次，自动清除过期的攻击历史记录和已过期的封禁条目。
+
+### 13.6 调优建议
+
+- 误封较多：提高 `fp.ban.threshold`（如 20）、缩短 `fp.ban.window`（如 30）、缩短 `fp.ban.duration`（如 180）
+- 漏封较多：降低 `fp.ban.threshold`（如 5）、延长 `fp.ban.window`（如 120）、延长 `fp.ban.duration`（如 600）
+- 内网环境可适当放宽阈值，公网环境建议保持默认或更严格
+
+---
+
+**版本**: 1.3.0  
+**更新日期**: 2026-07-12

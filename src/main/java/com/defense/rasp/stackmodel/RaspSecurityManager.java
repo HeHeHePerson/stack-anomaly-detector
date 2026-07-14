@@ -28,6 +28,8 @@ public class RaspSecurityManager extends java.lang.SecurityManager {
         try {
             IN_DETECTION.set(true);
             TemporalGuard.onFileRead(file);
+        } catch (SecurityException e) {
+            throw e;
         } catch (Throwable e) {
             // 检测逻辑异常，静默处理
         } finally {
@@ -46,6 +48,8 @@ public class RaspSecurityManager extends java.lang.SecurityManager {
         try {
             IN_DETECTION.set(true);
             TemporalGuard.onFileWrite(file);
+        } catch (SecurityException e) {
+            throw e;
         } catch (Throwable e) {
         } finally {
             IN_DETECTION.remove();
@@ -58,6 +62,8 @@ public class RaspSecurityManager extends java.lang.SecurityManager {
         try {
             IN_DETECTION.set(true);
             TemporalGuard.onFileDelete(file);
+        } catch (SecurityException e) {
+            throw e;
         } catch (Throwable e) {
         } finally {
             IN_DETECTION.remove();
@@ -70,6 +76,8 @@ public class RaspSecurityManager extends java.lang.SecurityManager {
         try {
             IN_DETECTION.set(true);
             TemporalGuard.onCommandExec(cmd);
+        } catch (SecurityException e) {
+            throw e;
         } catch (Throwable e) {
         } finally {
             IN_DETECTION.remove();

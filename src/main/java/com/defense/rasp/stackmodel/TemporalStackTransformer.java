@@ -48,20 +48,19 @@ public class TemporalStackTransformer implements ClassFileTransformer {
             public MethodVisitor visitMethod(int access, String name, String descriptor,
                                              String signature, String[] exceptions) {
                 MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
-                
+
                 if ("service".equals(name) && "(Ljavax/servlet/ServletRequest;Ljavax/servlet/ServletResponse;)V".equals(descriptor)) {
                     return new AdviceAdapter(Opcodes.ASM9, mv, access, name, descriptor) {
                         @Override
                         protected void onMethodEnter() {
-                            // beforeService(req)
                             super.visitVarInsn(Opcodes.ALOAD, 1);
+                            super.visitVarInsn(Opcodes.ALOAD, 2);
                             super.visitMethodInsn(Opcodes.INVOKESTATIC,
-                                GUARD_CLASS, "beforeService", "(Ljava/lang/Object;)V", false);
+                                GUARD_CLASS, "beforeService", "(Ljava/lang/Object;Ljava/lang/Object;)V", false);
                         }
 
                         @Override
                         protected void onMethodExit(int opcode) {
-                            // afterService(req, res) — finally 语义
                             super.visitVarInsn(Opcodes.ALOAD, 1);
                             super.visitVarInsn(Opcodes.ALOAD, 2);
                             super.visitMethodInsn(Opcodes.INVOKESTATIC,

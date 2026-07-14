@@ -153,6 +153,36 @@ public class AgentConfig {
             } catch (NumberFormatException ignored) {}
         }
 
+        if (params.containsKey("fp.ban.threshold")) {
+            try {
+                int t = Integer.parseInt(params.get("fp.ban.threshold"));
+                if (t > 0) {
+                    com.defense.rasp.stackmodel.FingerprintBanEngine.setAttackThreshold(t);
+                    System.out.println("[StackAnomalyDetector] 指纹封禁阈值: " + t + " 次");
+                }
+            } catch (NumberFormatException ignored) {}
+        }
+
+        if (params.containsKey("fp.ban.window")) {
+            try {
+                int w = Integer.parseInt(params.get("fp.ban.window"));
+                if (w > 0) {
+                    com.defense.rasp.stackmodel.FingerprintBanEngine.setAttackWindowMs(w * 1000L);
+                    System.out.println("[StackAnomalyDetector] 指纹攻击窗口: " + w + "s");
+                }
+            } catch (NumberFormatException ignored) {}
+        }
+
+        if (params.containsKey("fp.ban.duration")) {
+            try {
+                int d = Integer.parseInt(params.get("fp.ban.duration"));
+                if (d > 0) {
+                    com.defense.rasp.stackmodel.FingerprintBanEngine.setBanDurationMs(d * 1000L);
+                    System.out.println("[StackAnomalyDetector] 指纹封禁时长: " + d + "s");
+                }
+            } catch (NumberFormatException ignored) {}
+        }
+
         System.out.println("[StackAnomalyDetector] 配置加载完成 - 阻断模式: " + blockMode + 
                 ", 学习时长: " + learningDurationMs + "ms" +
                 ", debug日志: " + debugLogEnabled +

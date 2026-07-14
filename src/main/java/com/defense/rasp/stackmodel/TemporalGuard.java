@@ -213,8 +213,11 @@ public class TemporalGuard {
     // 延迟学习：在 beforeService 记录 URI，afterService 根据响应状态决定是否学习
     private static final ThreadLocal<String> PENDING_REQUEST_URI = new ThreadLocal<>();
     private static final ThreadLocal<String> REMOTE_ADDR = new ThreadLocal<>();
+    private static final ThreadLocal<String> BLOCK_REASON = new ThreadLocal<>();
+    private static final ThreadLocal<Boolean> IS_BANNED = new ThreadLocal<>();
+    private static final ThreadLocal<String> FP_FINGERPRINT = new ThreadLocal<>();
 
-    public static void beforeService(Object req) {
+    public static void beforeService(Object req, Object res) {
         AlertLogger.debug("[TemporalGuard] beforeService 被调用");
         if (req == null) return;
         try {
@@ -235,16 +238,60 @@ public class TemporalGuard {
                 if (addr != null) REMOTE_ADDR.set(addr);
             } catch (Exception ignored) {
             }
+            readFingerprintAndCheckBan(req, res);
             AlertLogger.debug("[TemporalGuard] beforeService URI: " + uri);
+        } catch (SecurityException e) {
+            throw e;
         } catch (Exception e) {
             AlertLogger.debug("[TemporalGuard] beforeService 失败: " + e.getMessage());
         }
     }
 
+    private static void readFingerprintAndCheckBan(Object req, Object res) {
+        try {
+            java.lang.reflect.Method getCookies = req.getClass().getMethod("getCookies");
+            Object[] cookies = (Object[]) getCookies.invoke(req);
+            if (cookies != null) {
+                for (Object cookie : cookies) {
+                    java.lang.reflect.Method getName = cookie.getClass().getMethod("getName");
+                    String name = (String) getName.invoke(cookie);
+                    if ("X-RASP-FP".equals(name)) {
+                        java.lang.reflect.Method getValue = cookie.getClass().getMethod("getValue");
+                        String fp = (String) getValue.invoke(cookie);
+                        if (fp != null && !fp.isEmpty()) {
+                            FP_FINGERPRINT.set(fp);
+                            if (FingerprintBanEngine.isBanned(fp)) {
+                                long remaining = FingerprintBanEngine.getBanRemainingSeconds(fp);
+                                sendBlockedPage(req, res, "浏览器指纹已封禁，剩余 " + remaining + " 秒", true);
+                                return;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        } catch (SecurityException e) {
+            throw e;
+        } catch (Exception ignored) {
+        }
+    }
+
     public static void afterService(Object req, Object res) {
         String uri = PENDING_REQUEST_URI.get();
+        String blockReason = BLOCK_REASON.get();
+        boolean banned = IS_BANNED.get() != null;
         PENDING_REQUEST_URI.remove();
         REMOTE_ADDR.remove();
+        BLOCK_REASON.remove();
+        IS_BANNED.remove();
+        FP_FINGERPRINT.remove();
+
+        if (blockReason != null || banned) {
+            String reason = blockReason != null ? blockReason : "指纹封禁";
+            sendBlockedPage(req, res, reason, banned);
+            return;
+        }
+
         if (uri == null) return;
 
         int status = -1;
@@ -468,23 +515,95 @@ public class TemporalGuard {
         return false;
     }
 
+    private static void sendBlockedPage(Object req, Object res, String reason, boolean isBanned) {
+        try {
+            java.lang.reflect.Method reset = res.getClass().getMethod("reset");
+            reset.invoke(res);
+        } catch (Exception ignored) {
+        }
+        try {
+            java.lang.reflect.Method setStatus = res.getClass().getMethod("setStatus", int.class);
+            setStatus.invoke(res, 403);
+            java.lang.reflect.Method setContentType = res.getClass().getMethod("setContentType", String.class);
+            setContentType.invoke(res, "text/html; charset=UTF-8");
+            java.lang.reflect.Method getWriter = res.getClass().getMethod("getWriter");
+            java.io.PrintWriter w = (java.io.PrintWriter) getWriter.invoke(res);
+            w.println("<!DOCTYPE html>");
+            w.println("<html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>访问被阻断</title>");
+            w.println("<style>");
+            w.println("*{margin:0;padding:0;box-sizing:border-box}");
+            w.println("body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0e27;color:#e0e0e0;display:flex;justify-content:center;align-items:center;min-height:100vh}");
+            w.println(".card{background:#111640;border:1px solid #1e2358;border-radius:12px;padding:48px;max-width:520px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.4)}");
+            w.println(".icon{font-size:56px;margin-bottom:16px;color:#ff4757}");
+            w.println("h1{font-size:24px;margin-bottom:12px;color:#ff6b7a}");
+            w.println("p{font-size:14px;color:#8890b5;line-height:1.6;margin-bottom:8px}");
+            w.println(".reason{background:#0d1130;border:1px solid #1e2358;border-radius:6px;padding:12px;margin:16px 0;font-size:12px;color:#ff6b7a;word-break:break-all}");
+            w.println(".footer{margin-top:24px;font-size:11px;color:#4a5080}");
+            w.println("</style></head><body>");
+            w.println("<div class=\"card\">");
+            w.println("<div class=\"icon\">&#128737;</div>");
+            w.println("<h1>" + (isBanned ? "访问受限" : "请求已被阻断") + "</h1>");
+            w.println("<p>" + (isBanned ? "您的浏览器指纹已被临时封禁" : "安全系统检测到异常行为，已阻止本次请求") + "</p>");
+            w.println("<div class=\"reason\">" + escapeHtml(reason) + "</div>");
+            w.println("<p>若您认为这是误判，请联系系统管理员。</p>");
+            w.println("<div class=\"footer\"><span id=\"fp\"></span><br>Security by RASP &mdash; Stack Anomaly Detector</div>");
+            w.println("</div>");
+            w.println("<script>");
+            w.println("(function(){var s=[];");
+            w.println("try{var c=document.createElement('canvas');c.width=280;c.height=60;var x=c.getContext('2d');");
+            w.println("var g=x.createLinearGradient(0,0,280,60);g.addColorStop(0,'#1a73e8');g.addColorStop(0.5,'#ea4335');g.addColorStop(1,'#34a853');x.fillStyle=g;x.fillRect(0,0,280,60);");
+            w.println("x.textBaseline='top';x.font='16px Arial';x.fillStyle='#fff';x.fillText('RASP Security',10,5);");
+            w.println("x.font='12px \"Times New Roman\"';x.fillStyle='rgba(255,255,255,0.85)';x.fillText('Browser Fingerprint',10,28);");
+            w.println("x.font='bold 10px \"Courier New\"';x.fillStyle='rgba(200,200,255,0.9)';x.fillText('Canvas|WebGL|CPU',10,48);");
+            w.println("x.beginPath();x.arc(250,30,15,0,Math.PI*2,false);x.fillStyle='rgba(255,255,0,0.3)';x.fill();");
+            w.println("s.push('cv:'+h(c.toDataURL().substring(300)))}catch(e){s.push('cv:err')}");
+            w.println("try{var w=document.createElement('canvas').getContext('webgl')||document.createElement('canvas').getContext('experimental-webgl');if(w){var d=w.getExtension('WEBGL_debug_renderer_info');if(d)s.push('gl:'+h(w.getParameter(d.UNMASKED_RENDERER_WEBGL)))}}catch(e){s.push('gl:err')}");
+            w.println("s.push('hc:'+(navigator.hardwareConcurrency||'unknown'));");
+            w.println("function h(str){var v=0;for(var i=0;i<str.length;i++){v=((v<<5)-v)+str.charCodeAt(i);v|=0}return(v>>>0).toString(36)}");
+            w.println("var fp=h(s.join('|'));document.cookie='X-RASP-FP='+fp+';path=/;max-age=86400;SameSite=Lax';var e=document.getElementById('fp');if(e)e.textContent='FP: '+fp");
+            w.println("})();</script>");
+            w.println("</body></html>");
+            w.flush();
+        } catch (Exception e) {
+            System.err.println("[TemporalGuard] 阻断页面发送失败: " + e.getMessage());
+        }
+    }
+
+    private static String escapeHtml(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '<': sb.append("&lt;"); break;
+                case '>': sb.append("&gt;"); break;
+                case '&': sb.append("&amp;"); break;
+                case '"': sb.append("&quot;"); break;
+                default: sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
     private static void block(String reason, int score, StackTraceElement[] stack) {
         com.defense.rasp.agent.AgentConfig.BlockMode mode = 
                 com.defense.rasp.agent.AgentConfig.getBlockMode();
         
         if (mode == com.defense.rasp.agent.AgentConfig.BlockMode.BLOCK) {
-            AlertLogger.block("[TemporalGuard] " + reason);
+            AlertLogger.block("[TemporalGuard] 分数=" + score + ", " + reason);
             AlertLogger.error("[TemporalGuard] 调用栈:\n" + formatStack(stack));
             checkCorrelation(score);
+            BLOCK_REASON.set(reason);
+            recordFingerprintAttack();
             throw new SecurityException("[TemporalGuard] 阻断异常调用: " + reason);
         } else {
-            AlertLogger.alarm("[MONITOR-ONLY] " + reason + " (仅告警模式)");
+            AlertLogger.alarm("[MONITOR-ONLY] 分数=" + score + ", " + reason + " (仅告警模式)");
             checkCorrelation(score);
         }
     }
 
     private static void alarm(String reason, int score, StackTraceElement[] stack) {
-        AlertLogger.alarm("[TemporalGuard] " + reason);
+        AlertLogger.alarm("[TemporalGuard] 分数=" + score + ", " + reason);
         checkCorrelation(score);
     }
 
@@ -495,6 +614,13 @@ public class TemporalGuard {
             AlertLogger.warn("[CORRELATION] IP " + remoteAddr
                 + " 在 " + AttackCorrelationEngine.getWindowSeconds() + "s 内累计风险分数超过阈值 "
                 + AttackCorrelationEngine.getScoreThreshold());
+        }
+    }
+
+    private static void recordFingerprintAttack() {
+        String fp = FP_FINGERPRINT.get();
+        if (fp != null) {
+            FingerprintBanEngine.recordAttack(fp);
         }
     }
 

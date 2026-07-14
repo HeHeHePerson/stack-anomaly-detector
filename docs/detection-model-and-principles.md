@@ -932,5 +932,144 @@ ConcurrentHashMap<String, WindowState>
 
 ---
 
-**版本**: 1.2.0  
-**更新日期**: 2026-07-09
+## 14. 浏览器指纹封禁模型
+
+### 14.1 设计
+
+`FingerprintBanEngine` 基于浏览器指纹（Canvas 指纹）追踪和封禁恶意客户端。当同一浏览器指纹在滑动时间窗口内触发阻断的次数超过阈值时，自动封禁该指纹一段时间。
+
+### 14.2 数据结构
+
+```java
+// 攻击历史：指纹 → 攻击时间戳列表
+ConcurrentHashMap<String, CopyOnWriteArrayList<Long>> attackHistory;
+
+// 封禁列表：指纹 → 封禁过期时间（epoch ms）
+ConcurrentHashMap<String, Long> banList;
+```
+
+- **attackHistory**：key 为浏览器指纹（Canvas 哈希），value 为滑动窗口内的攻击时间戳列表
+- **banList**：key 为浏览器指纹，value 为封禁过期时间点。过期后由清理线程自动移除
+
+### 14.3 指纹来源
+
+指纹通过嵌入在友好拦截页面中的 Canvas JavaScript 脚本采集，写入 `X-RASP-FP` Cookie：
+
+```
+用户被阻断 → 返回友好页面（含 Canvas 指纹 JS）
+  → 浏览器执行 Canvas 指纹脚本
+  → 生成浏览器指纹哈希
+  → 写入 X-RASP-FP Cookie
+  → 后续请求通过 Cookie 携带指纹
+```
+
+每次请求进入时，`beforeService` 从 `HttpServletRequest.getCookies()` 中读取 `X-RASP-FP` Cookie 值作为当前请求的指纹标识。
+
+### 14.4 滑动窗口逻辑
+
+`recordFingerprintAttack(fingerprint)` 被调用时（每次 `block()` 触发）：
+
+1. 从 `attackHistory` 获取该指纹的时间戳列表
+2. 清理过期记录：移除 `now - windowSeconds` 之前的旧时间戳
+3. 追加当前时间戳
+4. 统计窗口内剩余时间戳数量
+5. 若数量 >= `fp.ban.threshold`，将指纹加入 `banList`，过期时间 = `now + banDuration * 1000`
+6. 输出 `[FP_BAN]` 封禁触发日志
+
+```
+攻击时间线（window=60s, threshold=10）：
+  t0:   记录 [t0]                          → 次数: 1
+  t5:   记录 [t0, t5]                      → 次数: 2
+  ...
+  t55:  记录 [t0, t5, ..., t55]           → 次数: 10 → 触发封禁!
+       → banList.put(fingerprint, t55 + 300s)
+       → 清空 attackHistory[fingerprint]
+```
+
+### 14.5 封禁检查点
+
+在 `beforeService` 中，每次 HTTP 请求到达时执行：
+
+```java
+String fingerprint = extractFingerprintFromCookie(request);
+if (fingerprint != null && FingerprintBanEngine.isBanned(fingerprint)) {
+    // 指纹在封禁列表中且未过期
+    throw new SecurityException("Browser fingerprint banned: " + fingerprint);
+}
+```
+
+`isBanned(fingerprint)` 的逻辑：
+
+1. 从 `banList` 获取该指纹的过期时间
+2. 若不存在或已过期 (now > expiry) → 返回 false，从 `banList` 移除并记录过期日志
+3. 若存在且未过期 → 返回 true
+
+### 14.6 请求处理流程
+
+**正常请求（未封禁、未攻击）**：
+
+```
+请求 → beforeService: 提取 X-RASP-FP Cookie
+  → isBanned(fingerprint) → false → 继续正常处理
+```
+
+**攻击请求（未封禁但触发了阻断）**：
+
+```
+请求 → beforeService: 提取 X-RASP-FP Cookie
+  → isBanned(fingerprint) → false → 继续处理
+  → 检测到攻击 → block() 调用
+  → recordFingerprintAttack(fingerprint)
+  → 若攻击次数达到阈值 → 加入封禁列表
+```
+
+**已封禁请求**：
+
+```
+请求 → beforeService: 提取 X-RASP-FP Cookie
+  → isBanned(fingerprint) → true!
+  → 抛出 SecurityException
+  → afterService: 捕获异常 → 返回友好拦截页面
+```
+
+### 14.7 清理线程
+
+清理线程每 60 秒执行一次：
+
+```java
+// 清理攻击历史中的过期记录
+for (fingerprint in attackHistory) {
+    移除所有 now - windowSeconds 之前的时间戳
+    若列表为空 → 移除该指纹条目
+}
+
+// 清理封禁列表中的过期条目
+for (fingerprint, expiry in banList) {
+    if (now > expiry) {
+        移除该条目
+        记录 [FP_BAN] 封禁过期日志
+    }
+}
+```
+
+### 14.8 与攻击关联引擎的关系
+
+指纹封禁与跨请求攻击关联 (`AttackCorrelationEngine`) 是两个独立维度：
+
+- **攻击关联**：按 IP 地址统计，维度为用户网络层
+- **指纹封禁**：按浏览器指纹统计，维度为客户端浏览器层
+
+两者可并行工作。攻击者更换 IP 但未更换浏览器时，指纹封禁仍可拦截；更换浏览器但 IP 不变时，攻击关联仍可检测。
+
+### 14.9 参数
+
+| 参数 | 默认值 | 说明 |
+|------|-------|------|
+| `fp.ban.threshold` | `10` | 指纹封禁触发阈值。窗口内攻击次数达到此值时封禁 |
+| `fp.ban.window` | `60` | 攻击历史滑动窗口（秒） |
+| `fp.ban.duration` | `300` | 封禁时长（秒） |
+
+---
+
+**版本**: 1.3.0  
+**更新日期**: 2026-07-12
