@@ -165,11 +165,11 @@ public class BaselineLearningEngine {
         if (minProbability < MIN_NORMAL_PROBABILITY) {
             anomalyScore += 35;
             AlertLogger.alarm("[CTPG] 异常转移: " + weakestTransition +
-                    " 概率=" + String.format("%.4f", minProbability));
+                    " 概率=" + String.format("%.4f", minProbability) + " 分数=+35");
         } else if (minProbability < 0.1) {
             anomalyScore += 15;
             AlertLogger.debug("[CTPG] 低概率转移: " + weakestTransition +
-                    " 概率=" + String.format("%.4f", minProbability));
+                    " 概率=" + String.format("%.4f", minProbability) + " 分数=+15");
         }
 
         long threadId = Thread.currentThread().getId();
@@ -227,6 +227,17 @@ public class BaselineLearningEngine {
 
     public static boolean isLearningPhase() {
         return isLearningPhase;
+    }
+
+    public static boolean isLearningComplete() {
+        return !isLearningPhase;
+    }
+
+    public static long getBaselineFileSize() {
+        String path = getBaselineFilePath();
+        if (path == null) return 0;
+        java.io.File f = new java.io.File(path);
+        return f.exists() ? f.length() : 0;
     }
 
     public static int getLearningProgress() {
@@ -610,6 +621,10 @@ public class BaselineLearningEngine {
     private static int checkSensitiveFileAccess(String filePath) {
         if (filePath == null) return 0;
         String lowerPath = filePath.toLowerCase();
+        if (lowerPath.endsWith(".jar") || lowerPath.endsWith(".zip") ||
+            lowerPath.endsWith(".class") || lowerPath.endsWith(".war")) {
+            return 0;
+        }
         String[] sensitivePaths = {
             "tomcat-users.xml", "web.xml", "server.xml", "context.xml",
             "manager.xml", "host-manager.xml", ".properties", ".yml", ".yaml",
@@ -621,7 +636,7 @@ public class BaselineLearningEngine {
         };
         for (String sensitive : sensitivePaths) {
             if (lowerPath.contains(sensitive)) {
-                AlertLogger.alarm("[SensitiveFile] 敏感文件访问: " + filePath);
+                AlertLogger.alarm("[SensitiveFile] 敏感文件访问: " + filePath + " 分数=+30");
                 return 30;
             }
         }
@@ -661,14 +676,14 @@ public class BaselineLearningEngine {
             for (String dangerous : dangerousClasses) {
                 if (sig.contains(dangerous)) {
                     score += 20;
-                    AlertLogger.alarm("[DangerousClass] 危险类调用: " + sig);
+                    AlertLogger.alarm("[DangerousClass] 危险类调用: " + sig + " 分数=+20");
                     break;
                 }
             }
         }
         if (hasReflection && hasFileIO) {
             score += 30;
-            AlertLogger.alarm("[MemoryHorse] 检测到反射调用文件操作，可能为内存马行为");
+            AlertLogger.alarm("[MemoryHorse] 检测到反射调用文件操作，可能为内存马行为 分数=+30");
         }
         return score;
     }

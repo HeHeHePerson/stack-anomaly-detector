@@ -29,11 +29,15 @@ public class AgentConfig {
     private static long learningDurationMs = 300_000;
     private static boolean debugLogEnabled = false;
     private static boolean verboseInfoEnabled = false;
+    private static String managerUrl = null;
+    private static String managerToken = null;
 
     public static BlockMode getBlockMode() { return blockMode; }
     public static long getLearningDurationMs() { return learningDurationMs; }
     public static boolean isDebugLogEnabled() { return debugLogEnabled; }
     public static boolean isVerboseInfoEnabled() { return verboseInfoEnabled; }
+    public static String getManagerUrl() { return managerUrl; }
+    public static String getManagerToken() { return managerToken; }
 
     public static void parseArgs(String agentArgs) {
         String defaultPath = getDefaultBaselinePath();
@@ -181,6 +185,16 @@ public class AgentConfig {
                     System.out.println("[StackAnomalyDetector] 指纹封禁时长: " + d + "s");
                 }
             } catch (NumberFormatException ignored) {}
+        }
+
+        if (params.containsKey("manager.url")) {
+            managerUrl = params.get("manager.url");
+            if (managerToken == null) managerToken = "";
+            System.out.println("[StackAnomalyDetector] 集中管理地址: " + managerUrl);
+        }
+
+        if (params.containsKey("manager.token")) {
+            managerToken = params.get("manager.token");
         }
 
         System.out.println("[StackAnomalyDetector] 配置加载完成 - 阻断模式: " + blockMode + 

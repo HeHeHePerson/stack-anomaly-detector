@@ -28,6 +28,8 @@ public class AlertLogger {
     private static final AtomicLong execSkipped = new AtomicLong();
     private static final AtomicLong httpSkipped = new AtomicLong();
     private static final AtomicLong learnSkipped = new AtomicLong();
+    private static final AtomicLong alarmCount = new AtomicLong();
+    private static final AtomicLong blockCount = new AtomicLong();
     private static volatile long lastSummaryTime = System.currentTimeMillis();
     private static final long SUMMARY_INTERVAL_MS = 60_000;
     private static final ReentrantLock SUMMARY_LOCK = new ReentrantLock();
@@ -123,6 +125,7 @@ public class AlertLogger {
 
     /** alarm: 实际告警，始终写入文件并输出到控制台 */
     public static void alarm(String message) {
+        alarmCount.incrementAndGet();
         String logMessage = formatMessage("ALARM", message);
         System.out.println(logMessage);
         writeToFile(logMessage);
@@ -131,6 +134,7 @@ public class AlertLogger {
 
     /** block: 阻断告警，始终写入文件 */
     public static void block(String message) {
+        blockCount.incrementAndGet();
         String logMessage = formatMessage("BLOCK", message);
         writeToFile(logMessage);
         forwardAlert("BLOCK", message);
@@ -190,6 +194,9 @@ public class AlertLogger {
     public static void countExecSkipped()   { infoSkipped("exec", execSkipped); }
     public static void countHttpSkipped()   { infoSkipped("http", httpSkipped); }
     public static void countLearnSkipped()  { infoSkipped("learn", learnSkipped); }
+
+    public static long getAlarmCount() { return alarmCount.get(); }
+    public static long getBlockCount() { return blockCount.get(); }
 
     private static void forwardAlert(String level, String message) {
         try {

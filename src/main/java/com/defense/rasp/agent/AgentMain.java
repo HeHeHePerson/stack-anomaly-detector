@@ -112,6 +112,8 @@ public class AgentMain {
             }
             
             listLoadedClasses(inst);
+
+            startHeartbeatReporter();
             
             System.out.println("[StackAnomalyDetector] Agent initialization complete");
         } catch (Exception e) {
@@ -312,6 +314,8 @@ public class AgentMain {
             }
             
             System.out.println("[StackAnomalyDetector] Agent attachment complete");
+
+            startHeartbeatReporter();
         } catch (Exception e) {
             System.err.println("[StackAnomalyDetector] Agent attachment failed: " + e.getMessage());
             e.printStackTrace();
@@ -323,5 +327,23 @@ public class AgentMain {
      */
     public static void agentmain(String agentArgs) {
         System.err.println("[StackAnomalyDetector] Agent attached without Instrumentation support");
+    }
+
+    private static void startHeartbeatReporter() {
+        String url = AgentConfig.getManagerUrl();
+        if (url == null || url.isEmpty()) return;
+        try {
+            String hostname;
+            try {
+                hostname = java.net.InetAddress.getLocalHost().getHostName();
+            } catch (Exception e) {
+                hostname = System.getProperty("user.name", "unknown") + "-agent";
+            }
+            String agentId = hostname + ":" + System.getProperty("catalina.base",
+                System.getProperty("user.dir", "unknown"));
+            HeartbeatReporter.start(url, agentId, hostname, 30);
+        } catch (Exception e) {
+            System.err.println("[StackAnomalyDetector] 心跳启动失败: " + e.getMessage());
+        }
     }
 }

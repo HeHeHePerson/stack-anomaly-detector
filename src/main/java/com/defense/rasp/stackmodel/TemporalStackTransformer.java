@@ -1,13 +1,15 @@
 package com.defense.rasp.stackmodel;
 
 import org.objectweb.asm.*;
-import org.objectweb.asm.commons.AdviceAdapter;
+
 import java.lang.instrument.ClassFileTransformer;
 import java.security.ProtectionDomain;
 
 public class TemporalStackTransformer implements ClassFileTransformer {
 
     private static final String GUARD_CLASS = "com/defense/rasp/stackmodel/TemporalGuard";
+    private static final String BEFORE_DESC = "(Ljava/lang/Object;Ljava/lang/Object;)V";
+    private static final String AFTER_DESC = "(Ljava/lang/Object;Ljava/lang/Object;)V";
 
     @Override
     public byte[] transform(ClassLoader loader, String className,
@@ -36,10 +38,10 @@ public class TemporalStackTransformer implements ClassFileTransformer {
                 return null;
             }
         }
-        
+
         return null;
     }
-    
+
     private byte[] hookHttpServlet(byte[] classfileBuffer) {
         ClassReader cr = new ClassReader(classfileBuffer);
         ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_FRAMES);
@@ -50,23 +52,7 @@ public class TemporalStackTransformer implements ClassFileTransformer {
                 MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
 
                 if ("service".equals(name) && "(Ljavax/servlet/ServletRequest;Ljavax/servlet/ServletResponse;)V".equals(descriptor)) {
-                    return new AdviceAdapter(Opcodes.ASM9, mv, access, name, descriptor) {
-                        @Override
-                        protected void onMethodEnter() {
-                            super.visitVarInsn(Opcodes.ALOAD, 1);
-                            super.visitVarInsn(Opcodes.ALOAD, 2);
-                            super.visitMethodInsn(Opcodes.INVOKESTATIC,
-                                GUARD_CLASS, "beforeService", "(Ljava/lang/Object;Ljava/lang/Object;)V", false);
-                        }
-
-                        @Override
-                        protected void onMethodExit(int opcode) {
-                            super.visitVarInsn(Opcodes.ALOAD, 1);
-                            super.visitVarInsn(Opcodes.ALOAD, 2);
-                            super.visitMethodInsn(Opcodes.INVOKESTATIC,
-                                GUARD_CLASS, "afterService", "(Ljava/lang/Object;Ljava/lang/Object;)V", false);
-                        }
-                    };
+                    return new TryFinallyMethodVisitor(Opcodes.ASM9, mv, access, name, descriptor);
                 }
                 return mv;
             }
@@ -74,7 +60,51 @@ public class TemporalStackTransformer implements ClassFileTransformer {
         cr.accept(cv, ClassReader.EXPAND_FRAMES);
         return cw.toByteArray();
     }
-    
+
+    private static class TryFinallyMethodVisitor extends MethodVisitor {
+        private final Label tryStart = new Label();
+        private final Label tryEnd = new Label();
+        private final Label catchStart = new Label();
+
+        TryFinallyMethodVisitor(int api, MethodVisitor mv, int access, String name, String desc) {
+            super(api, mv);
+        }
+
+        @Override
+        public void visitCode() {
+            super.visitCode();
+            mv.visitLabel(tryStart);
+            mv.visitVarInsn(Opcodes.ALOAD, 1);
+            mv.visitVarInsn(Opcodes.ALOAD, 2);
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, GUARD_CLASS, "beforeService", BEFORE_DESC, false);
+        }
+
+        @Override
+        public void visitInsn(int opcode) {
+            if (opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN) {
+                mv.visitVarInsn(Opcodes.ALOAD, 1);
+                mv.visitVarInsn(Opcodes.ALOAD, 2);
+                mv.visitMethodInsn(Opcodes.INVOKESTATIC, GUARD_CLASS, "afterService", AFTER_DESC, false);
+            }
+            super.visitInsn(opcode);
+        }
+
+        @Override
+        public void visitMaxs(int maxStack, int maxLocals) {
+            mv.visitLabel(tryEnd);
+            mv.visitTryCatchBlock(tryStart, tryEnd, catchStart, "java/lang/Throwable");
+            mv.visitLabel(catchStart);
+            int exceptionVar = maxLocals;
+            mv.visitVarInsn(Opcodes.ASTORE, exceptionVar);
+            mv.visitVarInsn(Opcodes.ALOAD, 1);
+            mv.visitVarInsn(Opcodes.ALOAD, 2);
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, GUARD_CLASS, "afterService", AFTER_DESC, false);
+            mv.visitVarInsn(Opcodes.ALOAD, exceptionVar);
+            mv.visitInsn(Opcodes.ATHROW);
+            super.visitMaxs(Math.max(maxStack, 3), maxLocals + 1);
+        }
+    }
+
     private byte[] hookServletContext(byte[] classfileBuffer) {
         ClassReader cr = new ClassReader(classfileBuffer);
         ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);

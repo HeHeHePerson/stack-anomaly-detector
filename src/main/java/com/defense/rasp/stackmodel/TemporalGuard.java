@@ -28,6 +28,7 @@ public class TemporalGuard {
                 className.startsWith("org.apache.tomcat.") ||
                 className.startsWith("org.apache.coyote.") ||
                 className.startsWith("java.util.concurrent.") ||
+                className.startsWith("java.util.Timer") ||
                 className.startsWith("java.lang.Thread")) {
                 return true;
             }
@@ -48,6 +49,13 @@ public class TemporalGuard {
             }
         }
         return false;
+    }
+
+    private static boolean isJarOrClassFile(String filePath) {
+        if (filePath == null) return false;
+        String lower = filePath.toLowerCase();
+        return lower.endsWith(".jar") || lower.endsWith(".zip") ||
+               lower.endsWith(".class") || lower.endsWith(".war");
     }
 
     public static void onFileList(java.io.File dir) {
@@ -75,7 +83,7 @@ public class TemporalGuard {
         
         if (isSensitiveDirectory(dirPath)) {
             anomalyScore += 30;
-            AlertLogger.alarm("[SensitiveDir] 检测到敏感目录列举: " + dirPath);
+            AlertLogger.alarm("[SensitiveDir] 检测到敏感目录列举: " + dirPath + " 分数=+30");
             checkCorrelation(20);
         }
         
@@ -125,7 +133,9 @@ public class TemporalGuard {
             AlertLogger.countReadSkipped();
             return;
         }
-        
+
+        if (isJarOrClassFile(filePath)) return;
+
         int anomalyScore = BaselineLearningEngine.detectAnomaly(stack, filePath);
         anomalyScore += analyzeFileSensitivity(filePath);
 
@@ -216,6 +226,7 @@ public class TemporalGuard {
     private static final ThreadLocal<String> BLOCK_REASON = new ThreadLocal<>();
     private static final ThreadLocal<Boolean> IS_BANNED = new ThreadLocal<>();
     private static final ThreadLocal<String> FP_FINGERPRINT = new ThreadLocal<>();
+    private static final ThreadLocal<Boolean> AFTER_RAN = new ThreadLocal<>();
 
     public static void beforeService(Object req, Object res) {
         AlertLogger.debug("[TemporalGuard] beforeService 被调用");
@@ -277,47 +288,53 @@ public class TemporalGuard {
     }
 
     public static void afterService(Object req, Object res) {
-        String uri = PENDING_REQUEST_URI.get();
-        String blockReason = BLOCK_REASON.get();
-        boolean banned = IS_BANNED.get() != null;
-        PENDING_REQUEST_URI.remove();
-        REMOTE_ADDR.remove();
-        BLOCK_REASON.remove();
-        IS_BANNED.remove();
-        FP_FINGERPRINT.remove();
-
-        if (blockReason != null || banned) {
-            String reason = blockReason != null ? blockReason : "指纹封禁";
-            sendBlockedPage(req, res, reason, banned);
-            return;
-        }
-
-        if (uri == null) return;
-
-        int status = -1;
+        if (AFTER_RAN.get() != null) return;
+        AFTER_RAN.set(true);
         try {
-            java.lang.reflect.Method m = res.getClass().getMethod("getStatus");
-            status = (Integer) m.invoke(res);
-        } catch (Exception e) {
-        }
+            String uri = PENDING_REQUEST_URI.get();
+            String blockReason = BLOCK_REASON.get();
+            boolean banned = IS_BANNED.get() != null;
+            PENDING_REQUEST_URI.remove();
+            REMOTE_ADDR.remove();
+            BLOCK_REASON.remove();
+            IS_BANNED.remove();
+            FP_FINGERPRINT.remove();
 
-        if (BaselineLearningEngine.isLearningPhase()) {
-            if (status >= 200 && status < 400) {
-                UrlBaselineModel.learnUrl(uri);
-            }
-            if (status < 200 || status >= 400) {
-                AlertLogger.debug("[TemporalGuard] 学习期跳过非成功响应: " + uri + " (status=" + status + ")");
+            if (blockReason != null || banned) {
+                String reason = blockReason != null ? blockReason : "指纹封禁";
+                sendBlockedPage(req, res, reason, banned);
                 return;
             }
-        } else {
-            UrlBaselineModel.checkUrl(uri, status);
-        }
 
-        AlertLogger.debug("[TemporalGuard] HTTP 请求: " + uri);
-        recordThreadEvent("HttpServlet.service", StackTemporalEngine.CallEvent.EventType.ENTER);
-        long jvmUptime = System.currentTimeMillis() - BaselineLearningEngine.LEARNING_START_TIME;
-        BaselineLearningEngine.learnNormalStack(Thread.currentThread().getStackTrace(), jvmUptime < 120_000);
-        AlertLogger.countHttpSkipped();
+            if (uri == null) return;
+
+            int status = -1;
+            try {
+                java.lang.reflect.Method m = res.getClass().getMethod("getStatus");
+                status = (Integer) m.invoke(res);
+            } catch (Exception e) {
+            }
+
+            if (BaselineLearningEngine.isLearningPhase()) {
+                if (status >= 200 && status < 400) {
+                    UrlBaselineModel.learnUrl(uri);
+                }
+                if (status < 200 || status >= 400) {
+                    AlertLogger.debug("[TemporalGuard] 学习期跳过非成功响应: " + uri + " (status=" + status + ")");
+                    return;
+                }
+            } else {
+                UrlBaselineModel.checkUrl(uri, status);
+            }
+
+            AlertLogger.debug("[TemporalGuard] HTTP 请求: " + uri);
+            recordThreadEvent("HttpServlet.service", StackTemporalEngine.CallEvent.EventType.ENTER);
+            long jvmUptime = System.currentTimeMillis() - BaselineLearningEngine.LEARNING_START_TIME;
+            BaselineLearningEngine.learnNormalStack(Thread.currentThread().getStackTrace(), jvmUptime < 120_000);
+            AlertLogger.countHttpSkipped();
+        } finally {
+            AFTER_RAN.remove();
+        }
     }
 
     public static void onServletContextAccess(String path) {
@@ -435,6 +452,10 @@ public class TemporalGuard {
     private static int analyzeFileSensitivity(String filePath) {
         if (filePath == null) return 0;
         String lowerPath = filePath.toLowerCase();
+        if (lowerPath.endsWith(".jar") || lowerPath.endsWith(".zip") ||
+            lowerPath.endsWith(".class") || lowerPath.endsWith(".war")) {
+            return 0;
+        }
         int score = 0;
 
         // 最高风险：系统凭据文件和密钥
@@ -444,7 +465,7 @@ public class TemporalGuard {
         };
         for (String kw : criticalFiles) {
             if (lowerPath.contains(kw)) {
-                AlertLogger.alarm("[SensitiveFile] 高风险文件访问: " + filePath);
+                AlertLogger.alarm("[SensitiveFile] 高风险文件访问: " + filePath + " 分数=+60");
                 score += 60;
                 break;
             }
@@ -457,7 +478,7 @@ public class TemporalGuard {
         };
         for (String kw : highRiskFiles) {
             if (lowerPath.contains(kw)) {
-                AlertLogger.alarm("[SensitiveFile] 高风险配置访问: " + filePath);
+                AlertLogger.alarm("[SensitiveFile] 高风险配置访问: " + filePath + " 分数=+50");
                 score += 50;
                 break;
             }
