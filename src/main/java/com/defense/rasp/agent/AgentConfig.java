@@ -67,6 +67,7 @@ public class AgentConfig {
         if (params.containsKey("learning.duration")) {
             try {
                 learningDurationMs = Long.parseLong(params.get("learning.duration"));
+                com.defense.rasp.stackmodel.BaselineLearningEngine.LEARNING_DURATION_MS = learningDurationMs;
             } catch (NumberFormatException e) {
                 System.out.println("[StackAnomalyDetector] 无效的学习时长参数: " + params.get("learning.duration") + "，使用默认值 300000ms");
             }

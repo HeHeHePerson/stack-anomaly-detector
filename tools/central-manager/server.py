@@ -27,6 +27,9 @@ from datetime import datetime, timedelta
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.db")
 
+def now_str(fmt="%Y-%m-%d %H:%M:%S"):
+    return datetime.now().strftime(fmt)
+
 # ── 数据库 ──────────────────────────────────────────────
 
 def get_db():
@@ -81,6 +84,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS configurations (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             version     INTEGER UNIQUE,
+            target      TEXT DEFAULT 'all',
             config_json TEXT,
             description TEXT,
             created_at  TEXT,
@@ -88,7 +92,42 @@ def init_db():
         );
     """)
     conn.commit()
+    try:
+        conn.execute("ALTER TABLE configurations ADD COLUMN target TEXT DEFAULT 'all'")
+        conn.commit()
+    except:
+        pass
+    try:
+        conn.execute("ALTER TABLE agents ADD COLUMN agent_group TEXT DEFAULT ''")
+        conn.commit()
+    except:
+        pass
     conn.close()
+
+# ── 配置参数定义 (友好配置表单) ──────────────────────────
+
+CONFIG_PARAMS = [
+    {"key": "block.mode", "type": "select", "options": ["monitor", "block"], "default": "monitor",
+     "desc": "阻断模式", "detail": "monitor=仅告警记录, block=拦截攻击请求并返回403"},
+    {"key": "learning.duration", "type": "number", "default": 300000,
+     "desc": "学习时长(ms)", "detail": "基线学习阶段持续时间, 默认300000ms=5分钟"},
+    {"key": "debug.log", "type": "bool", "default": False,
+     "desc": "调试日志", "detail": "是否输出DEBUG级别日志到告警文件"},
+    {"key": "fp.ban.threshold", "type": "number", "default": 10,
+     "desc": "指纹封禁阈值", "detail": "时间窗口内同一指纹攻击次数超过此值即封禁"},
+    {"key": "fp.ban.window", "type": "number", "default": 60,
+     "desc": "指纹封禁窗口(s)", "detail": "指纹攻击计数的时间窗口, 单位秒"},
+    {"key": "fp.ban.duration", "type": "number", "default": 300,
+     "desc": "指纹封禁时长(s)", "detail": "封禁持续时间, 单位秒"},
+    {"key": "alert.score.threshold", "type": "number", "default": 50,
+     "desc": "告警分数阈值", "detail": "异常分数>=此值触发阻断, <此值仅告警"},
+    {"key": "ctpg.score.weight", "type": "number", "default": 35,
+     "desc": "CTPG权重", "detail": "调用转移概率异常的分数权重"},
+    {"key": "ssf.score.weight", "type": "number", "default": 30,
+     "desc": "SSF权重", "detail": "栈签名指纹异常的分数权重"},
+]
+
+TARGET_SUGGESTIONS = ["all", "web", "api", "db"]
 
 # ── Syslog 接收器 ───────────────────────────────────────
 
@@ -119,7 +158,7 @@ def handle_syslog(data, addr):
             app_name = payload.get("app", f"{addr[0]}:unknown")
             timestamp = payload.get("timestamp", "")
             if timestamp.isdigit():
-                timestamp = datetime.utcfromtimestamp(int(timestamp) / 1000).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                timestamp = datetime.fromtimestamp(int(timestamp) / 1000).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
             conn = get_db()
             matched = conn.execute(
@@ -201,7 +240,7 @@ def teardown_request(exc):
 def heartbeat():
     data = request.get_json(force=True, silent=True) or {}
     agent_id = data.get("agent_id", f"{request.remote_addr}:unknown")
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_str()
 
     existing = g.db.execute("SELECT id FROM agents WHERE id = ?", (agent_id,)).fetchone()
     if existing:
@@ -249,22 +288,45 @@ def heartbeat():
 
 @app.route("/api/v1/config", methods=["GET"])
 def get_config():
-    version = request.args.get("version", "0")
-    latest = g.db.execute(
-        "SELECT * FROM configurations WHERE active = 1 ORDER BY version DESC LIMIT 1"
-    ).fetchone()
-    if not latest or latest["version"] <= int(version):
-        return jsonify({"status": "unchanged", "version": int(version)})
+    version = int(request.args.get("version", "0"))
+    agent_id = request.args.get("agent_id", "")
+    group = request.args.get("group", "")
+
+    if not group and agent_id:
+        agent_row = g.db.execute(
+            "SELECT agent_group FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()
+        if agent_row and agent_row["agent_group"]:
+            group = agent_row["agent_group"]
+
+    candidates = []
+    for row in g.db.execute(
+        "SELECT * FROM configurations WHERE active = 1 ORDER BY version DESC"
+    ).fetchall():
+        target = row["target"] or "all"
+        if target == "all":
+            candidates.append(row)
+        elif group and (target == group or target == "group:" + group):
+            candidates.insert(0, row)
+        elif target == agent_id:
+            candidates.insert(0, row)
+
+    if not candidates:
+        return jsonify({"status": "unchanged", "version": version})
+
+    best = candidates[0]
+    if best["version"] <= version:
+        return jsonify({"status": "unchanged", "version": version})
 
     return jsonify({
         "status": "updated",
-        "version": latest["version"],
-        "config": json.loads(latest["config_json"])
+        "version": best["version"],
+        "config": json.loads(best["config_json"])
     })
 
 @app.route("/api/v1/fingerprint-bans", methods=["GET"])
 def get_fingerprint_bans():
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_str()
     bans = g.db.execute(
         "SELECT fingerprint, reason, expires_at FROM fingerprint_bans WHERE expires_at > ?",
         (now,)
@@ -311,8 +373,8 @@ def report_fingerprint_ban():
     if not fp:
         return jsonify({"status": "error", "message": "missing fingerprint"}), 400
 
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    expires = (datetime.utcnow() + timedelta(seconds=data.get("duration", 300))).strftime("%Y-%m-%d %H:%M:%S")
+    now = now_str()
+    expires = (datetime.now() + timedelta(seconds=data.get("duration", 300))).strftime("%Y-%m-%d %H:%M:%S")
 
     g.db.execute(
         "INSERT OR REPLACE INTO fingerprint_bans (fingerprint, reason, source_agent, banned_at, expires_at) "
@@ -376,10 +438,21 @@ def export_alerts():
 
 # ── Agent 管理 (增/删) ───────────────────────────────────
 
-@app.route("/api/v1/agents/<agent_id>", methods=["DELETE"])
+@app.route("/api/v1/agents/<path:agent_id>", methods=["DELETE"])
 def delete_agent(agent_id):
     g.db.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
     g.db.execute("DELETE FROM alerts WHERE agent_id = ?", (agent_id,))
+    g.db.commit()
+    return jsonify({"status": "ok"})
+
+@app.route("/api/v1/agents/<path:agent_id>/group", methods=["POST"])
+def set_agent_group(agent_id):
+    data = request.get_json(force=True, silent=True) or {}
+    group = data.get("group", "").strip()
+    existing = g.db.execute("SELECT id FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    if not existing:
+        return jsonify({"status": "error", "message": "agent not found"}), 404
+    g.db.execute("UPDATE agents SET agent_group = ? WHERE id = ?", (group, agent_id))
     g.db.commit()
     return jsonify({"status": "ok"})
 
@@ -389,23 +462,24 @@ def add_agent():
     agent_id = data.get("agent_id", "").strip()
     if not agent_id:
         return jsonify({"status": "error", "message": "agent_id required"}), 400
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_str()
     hostname = data.get("hostname", agent_id)
     ip_addr = data.get("ip", request.remote_addr)
     version = data.get("version", "-")
     block_mode = data.get("block_mode", "MONITOR")
+    group = data.get("group", "").strip()
 
     existing = g.db.execute("SELECT id FROM agents WHERE id = ?", (agent_id,)).fetchone()
     if existing:
         g.db.execute(
-            "UPDATE agents SET hostname=?, ip=?, version=?, block_mode=?, last_heartbeat=? WHERE id=?",
-            (hostname, ip_addr, version, block_mode, now, agent_id)
+            "UPDATE agents SET hostname=?, ip=?, version=?, block_mode=?, last_heartbeat=?, agent_group=? WHERE id=?",
+            (hostname, ip_addr, version, block_mode, now, group, agent_id)
         )
     else:
         g.db.execute(
-            "INSERT INTO agents (id, hostname, ip, version, block_mode, last_heartbeat, registered_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (agent_id, hostname, ip_addr, version, block_mode, now, now)
+            "INSERT INTO agents (id, hostname, ip, version, block_mode, last_heartbeat, registered_at, agent_group) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (agent_id, hostname, ip_addr, version, block_mode, now, now, group)
         )
     g.db.commit()
     return jsonify({"status": "ok"})
@@ -474,15 +548,28 @@ function delAgent(id) {
     .then(r=>r.json()).then(d=>{ alert('已删除'); location.reload(); });
 }
 
+function setAgentGroup(id, el) {
+    var g = el.value.trim();
+    fetch('/api/v1/agents/'+encodeURIComponent(id)+'/group', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({group: g})
+    }).then(r=>r.json()).then(d=>{
+        if (d.status=='ok') { el.style.borderColor='#1a5a30'; setTimeout(function(){el.style.borderColor='';},1500); }
+        else { alert('失败: '+(d.message||'')); }
+    });
+}
+
 function addAgent() {
     var id = document.getElementById('new-agent-id').value.trim();
     var host = document.getElementById('new-agent-host').value.trim();
     var ip = document.getElementById('new-agent-ip').value.trim();
+    var grp = document.getElementById('new-agent-group').value.trim();
     if (!id) { alert('Agent ID 不能为空'); return; }
     fetch('/api/v1/agents', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({agent_id:id, hostname:host||id, ip:ip||''})
+        body:JSON.stringify({agent_id:id, hostname:host||id, ip:ip||'', group:grp||''})
     }).then(r=>r.json()).then(d=>{
         if (d.status=='ok') { alert('节点已添加'); location.reload(); }
         else { alert('失败: '+(d.message||'')); }
@@ -505,14 +592,15 @@ function addAgent() {
 
 @app.route("/")
 def dashboard():
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_str()
 
     total_agents = g.db.execute("SELECT COUNT(*) as c FROM agents").fetchone()["c"]
     online_agents = g.db.execute(
-        "SELECT COUNT(*) as c FROM agents WHERE last_heartbeat > datetime('now','-2 minutes')"
+        "SELECT COUNT(*) as c FROM agents WHERE last_heartbeat > ?",
+        ((datetime.now() - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S"),)
     ).fetchone()["c"]
 
-    today_start = datetime.utcnow().strftime("%Y-%m-%d 00:00:00")
+    today_start = datetime.now().strftime("%Y-%m-%d 00:00:00")
     total_alerts = g.db.execute(
         "SELECT COUNT(*) as c FROM alerts WHERE created_at >= ?", (today_start,)
     ).fetchone()["c"]
@@ -551,7 +639,7 @@ def dashboard():
           <td class="mono">{r["created_at"][11:19] if r["created_at"] else ""}</td>
           <td>{r["hostname"] or r["agent_id"][:20]}</td>
           <td><span class="badge {'badge-danger' if r['type']=='BLOCK' else 'badge-warn' if r['type']=='FP-BAN' else 'badge-info'}">{r["type"]}</span></td>
-          <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{r["message"][:80]}</td>
+          <td title="{r["message"].replace(chr(34), '&quot;')}" style="max-width:500px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{r["message"]}</td>
           <td class="mono">{r["remote_addr"] or "-"}</td>
         </tr>''' for r in recent_alerts)}
       </table>
@@ -561,8 +649,8 @@ def dashboard():
 
 @app.route("/agents")
 def agents_page():
-    agents = g.db.execute("SELECT * FROM agents ORDER BY last_heartbeat DESC").fetchall()
-    now = datetime.utcnow()
+    agents = g.db.execute("SELECT *, agent_group FROM agents ORDER BY last_heartbeat DESC").fetchall()
+    now = datetime.now()
     rows = []
     for a in agents:
         hb = a["last_heartbeat"] or ""
@@ -578,6 +666,7 @@ def agents_page():
           <td>{a["hostname"] or a["id"][:30]}</td>
           <td class="mono">{a["id"]}</td>
           <td class="mono">{a["ip"]}</td>
+          <td><input value="{a["agent_group"] or ''}" onchange="setAgentGroup('{a["id"]}',this)" list="group-suggestions" placeholder="未分组" style="background:#0d1130;border:1px solid #2a3060;color:#b0b8d0;padding:3px 8px;border-radius:3px;font-size:12px;width:80px"></td>
           <td>{a["version"] or "-"}</td>
           <td>{a["block_mode"]}</td>
           <td>{badge}</td>
@@ -588,7 +677,8 @@ def agents_page():
         </tr>''')
 
     content = f"""<div class="card"><h2>节点列表</h2>
-    <table><tr><th>主机名</th><th>Agent ID</th><th>IP</th><th>版本</th><th>模式</th><th>状态</th><th>最后心跳</th><th>告警</th><th>阻断</th><th>操作</th></tr>
+    <datalist id="group-suggestions">{''.join(f'<option value="{t}">' for t in TARGET_SUGGESTIONS)}</datalist>
+    <table><tr><th>主机名</th><th>Agent ID</th><th>IP</th><th>分组</th><th>版本</th><th>模式</th><th>状态</th><th>最后心跳</th><th>告警</th><th>阻断</th><th>操作</th></tr>
     {''.join(rows)}</table></div>
     <div class="card">
       <h2>添加节点</h2>
@@ -599,6 +689,8 @@ def agents_page():
           <input id="new-agent-host" placeholder="选填" style="background:#0d1130;border:1px solid #2a3060;color:#b0b8d0;padding:8px 12px;border-radius:4px;width:160px"></div>
         <div><label style="display:block;font-size:12px;color:#6670a0;margin-bottom:4px">IP</label>
           <input id="new-agent-ip" placeholder="选填" style="background:#0d1130;border:1px solid #2a3060;color:#b0b8d0;padding:8px 12px;border-radius:4px;width:160px"></div>
+        <div><label style="display:block;font-size:12px;color:#6670a0;margin-bottom:4px">分组</label>
+          <input id="new-agent-group" list="group-suggestions" placeholder="如 web" style="background:#0d1130;border:1px solid #2a3060;color:#b0b8d0;padding:8px 12px;border-radius:4px;width:100px"></div>
         <button class="btn" onclick="addAgent()" style="background:#1a3050;border-color:#2a5080;color:#60a5fa;height:36px">添加</button>
       </div>
     </div>"""
@@ -640,7 +732,7 @@ def alerts_page():
       <td class="mono">{r["created_at"][:19] if r["created_at"] else ""}</td>
       <td>{r["hostname"] or r["agent_id"][:20]}</td>
       <td><span class="badge {'badge-danger' if r['type']=='BLOCK' else 'badge-warn' if r['type']=='FP-BAN' else 'badge-info'}">{r["type"]}</span></td>
-      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{r["message"][:100]}</td>
+      <td title="{r["message"].replace(chr(34), '&quot;')}" style="max-width:500px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{r["message"]}</td>
       <td>{r["score"]}</td>
       <td class="mono">{r["remote_addr"] or "-"}</td>
     </tr>''' for r in alerts)
@@ -660,7 +752,7 @@ def alerts_page():
 
 @app.route("/fingerprints")
 def fingerprints_page():
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_str()
     msg = ""
 
     if request.method == "POST" or (hasattr(request, 'form') and request.form):
@@ -706,30 +798,143 @@ def config_page():
 
     config_list = ''.join(f'''<tr>
       <td>v{r["version"]}</td>
+      <td><span class="badge badge-info">{r["target"] or "all"}</span></td>
       <td>{r["description"] or "-"}</td>
       <td class="mono">{r["created_at"][:19] if r["created_at"] else ""}</td>
       <td>{'<span class="badge badge-ok">生效中</span>' if r["active"] else '<span class="badge badge-info">历史</span>'}</td>
     </tr>''' for r in configs)
 
     current_config = json.dumps(json.loads(current["config_json"]), indent=2, ensure_ascii=False) if current else "{}"
-
+    current_target = current["target"] if current else "all"
     flash_html = f'<div class="flash">{msg}</div>' if msg else ""
+
+    # Build form fields
+    form_fields = ''.join(f'''<div class="config-field">
+      <label>
+        <span class="cfg-key">{p['key']}</span>
+        <span class="cfg-desc">{p['desc']}</span>
+      </label>
+      <div class="cfg-input">
+        {'' if p['type']=='bool' else
+          f'<select id="cfg_{p["key"].replace(".","_")}" class="cfg-val">'
+          + ''.join(f'<option value="{o}">{o}</option>' for o in p['options']) + '</select>'
+          if p['type']=='select' else
+          f'<input type="number" id="cfg_{p["key"].replace(".","_")}" class="cfg-val" value="{p["default"]}" placeholder="{p["detail"]}">'
+          if p['type']=='number' else
+          f'<input type="text" id="cfg_{p["key"].replace(".","_")}" class="cfg-val" value="{p["default"]}" placeholder="{p["detail"]}">'}
+        <span class="cfg-hint">{p['detail']}</span>
+      </div>
+    </div>''' for p in CONFIG_PARAMS if p['type'] != 'bool')
+
+    build_bool_checkboxes = ''.join(
+        f'''<div class="config-field">
+          <label><span class="cfg-key">{p['key']}</span><span class="cfg-desc">{p['desc']}</span></label>
+          <div class="cfg-input">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+              <input type="checkbox" id="cfg_{p['key'].replace('.','_')}" class="cfg-bool" {'checked' if p['default'] else ''}>
+              <span class="cfg-hint">{p['detail']}</span>
+            </label>
+          </div>
+        </div>''' for p in CONFIG_PARAMS if p['type'] == 'bool'
+    )
+
+    target_datalist = ''.join(
+        f'<option value="{t}">' for t in TARGET_SUGGESTIONS
+    )
 
     content = f"""<div class="card"><h2>配置管理</h2>
     {flash_html}
     <h3 style="font-size:14px;color:#8890b5;margin-bottom:8px">当前生效配置</h3>
-    <pre style="background:#0d1130;padding:16px;border-radius:6px;font-size:12px;overflow-x:auto;color:#b0b8d0;margin-bottom:16px">{current_config}</pre>
+    <pre style="background:#0d1130;padding:16px;border-radius:6px;font-size:12px;overflow-x:auto;color:#b0b8d0;margin-bottom:4px">{current_config}</pre>
+    <div style="font-size:11px;color:#6670a0;margin-bottom:16px">目标: {current_target}</div>
+
     <h3 style="font-size:14px;color:#8890b5;margin-bottom:8px">发布新配置</h3>
-    <form method="POST" action="/config/publish" style="display:flex;flex-direction:column;gap:12px">
-      <textarea name="config_json" rows="12" style="background:#0d1130;border:1px solid #2a3060;color:#b0b8d0;padding:12px;border-radius:6px;font-family:'Courier New',monospace;font-size:12px" placeholder='{{"block.mode":"block","fp.ban.threshold":5}}'></textarea>
+    <div class="toolbar" style="margin-bottom:0">
+      <button class="btn" id="btn-form" onclick="switchMode('form')" style="background:#1a3050;border-color:#2a5080;color:#60a5fa">友好配置</button>
+      <button class="btn" id="btn-json" onclick="switchMode('json')">JSON 模式</button>
+    </div>
+
+    <form method="POST" action="/config/publish" id="config-form" style="display:flex;flex-direction:column;gap:12px">
+      <datalist id="target-suggestions">{target_datalist}</datalist>
+      <div id="panel-form">
+        {form_fields}
+        {build_bool_checkboxes}
+        <div style="margin-top:8px">
+          <span style="font-size:12px;color:#8890b5;display:block;margin-bottom:4px">目标分组</span>
+          <input id="cfg-target-form" oninput="syncTarget()" list="target-suggestions" placeholder="输入分组名, 如 all / web / api / db" value="all" style="background:#0d1130;border:1px solid #2a3060;color:#b0b8d0;padding:6px 12px;border-radius:4px;font-size:13px;width:280px">
+        </div>
+      </div>
+      <div id="panel-json" style="display:none">
+        <textarea id="json-text" rows="12" style="width:100%;background:#0d1130;border:1px solid #2a3060;color:#b0b8d0;padding:12px;border-radius:6px;font-family:'Courier New',monospace;font-size:12px" placeholder='{{"block.mode":"block","fp.ban.threshold":5}}'></textarea>
+        <div style="margin-top:8px">
+          <span style="font-size:12px;color:#8890b5;display:block;margin-bottom:4px">目标分组</span>
+          <input id="cfg-target-json" oninput="syncTarget()" list="target-suggestions" placeholder="输入分组名" value="all" style="background:#0d1130;border:1px solid #2a3060;color:#b0b8d0;padding:6px 12px;border-radius:4px;font-size:13px;width:280px">
+        </div>
+      </div>
+      <input type="hidden" name="target" id="cfg-target-hidden" value="all">
+      <input type="hidden" name="config_json" id="cfg-json-hidden">
       <div style="display:flex;gap:12px;align-items:center">
         <input name="description" placeholder="变更说明" style="flex:1;background:#0d1130;border:1px solid #2a3060;color:#b0b8d0;padding:8px 12px;border-radius:4px">
-        <button class="btn" style="background:#1a3050;border-color:#2a5080;color:#60a5fa">发布配置</button>
+        <button class="btn" style="background:#1a3050;border-color:#2a5080;color:#60a5fa" onclick="prepareSubmit(event)">发布配置</button>
       </div>
     </form>
+
     <h3 style="font-size:14px;color:#8890b5;margin:24px 0 8px">历史配置</h3>
-    <table><tr><th>版本</th><th>说明</th><th>发布时间</th><th>状态</th></tr>
-    {config_list}</table></div>"""
+    <table><tr><th>版本</th><th>目标</th><th>说明</th><th>发布时间</th><th>状态</th></tr>
+    {config_list}</table></div>
+
+    <style>
+    .config-field{{display:flex;align-items:flex-start;gap:12px;padding:8px 0;border-bottom:1px solid #1a1e35}}
+    .config-field label{{min-width:200px}}
+    .cfg-key{{display:block;font-size:13px;color:#b0b8d0;font-family:'Courier New',monospace}}
+    .cfg-desc{{display:block;font-size:11px;color:#6670a0;margin-top:2px}}
+    .cfg-input{{flex:1;display:flex;flex-direction:column;gap:4px}}
+    .cfg-val,.cfg-bool{{background:#0d1130;border:1px solid #2a3060;color:#b0b8d0;padding:6px 10px;border-radius:4px;font-size:12px}}
+    .cfg-val{{width:200px}}
+    .cfg-hint{{font-size:11px;color:#505880}}
+    </style>
+
+    <script>
+    var mode = 'form';
+    function switchMode(m) {{
+        mode = m;
+        document.getElementById('panel-form').style.display = m==='form'?'block':'none';
+        document.getElementById('panel-json').style.display = m==='json'?'block':'none';
+        document.getElementById('btn-form').style.background = m==='form'?'#1a3050':'';
+        document.getElementById('btn-form').style.borderColor = m==='form'?'#2a5080':'';
+        document.getElementById('btn-json').style.background = m==='json'?'#1a3050':'';
+        document.getElementById('btn-json').style.borderColor = m==='json'?'#2a5080':'';
+    }}
+    function syncTarget() {{
+        var fv = document.getElementById('cfg-target-form').value;
+        var jv = document.getElementById('cfg-target-json').value;
+        document.getElementById('cfg-target-form').value = mode==='form' ? fv : jv;
+        document.getElementById('cfg-target-json').value = mode==='form' ? fv : jv;
+        document.getElementById('cfg-target-hidden').value = mode==='form' ? fv : jv;
+    }}
+    function prepareSubmit(e) {{
+        syncTarget();
+        if (mode === 'form') {{
+            var obj = {{}};
+            var params = {json.dumps(CONFIG_PARAMS)};
+            params.forEach(function(p) {{
+                var el = document.getElementById('cfg_'+p.key.replace(/\\./g,'_'));
+                if (!el) return;
+                if (p.type === 'bool') {{
+                    if (el.checked) obj[p.key] = true;
+                }} else if (p.type === 'number') {{
+                    var v = parseInt(el.value);
+                    if (!isNaN(v)) obj[p.key] = v;
+                }} else {{
+                    if (el.value) obj[p.key] = el.value;
+                }}
+            }});
+            document.getElementById('cfg-json-hidden').value = JSON.stringify(obj);
+        }} else {{
+            document.getElementById('cfg-json-hidden').value = document.getElementById('json-text').value;
+        }}
+    }}
+    </script>"""
 
     return render_template_string(BASE_HTML, page="config", content=content)
 
@@ -741,19 +946,20 @@ def publish_config():
     except json.JSONDecodeError:
         return """<script>alert('JSON 格式无效');location.href='/config'</script>"""
 
+    target = request.form.get("target", "all").strip()
     description = request.form.get("description", "")
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_str()
 
     latest = g.db.execute("SELECT MAX(version) as v FROM configurations").fetchone()
     version = (latest["v"] or 0) + 1
 
-    g.db.execute("UPDATE configurations SET active = 0 WHERE active = 1")
+    g.db.execute("UPDATE configurations SET active = 0 WHERE active = 1 AND target = ?", (target,))
     g.db.execute(
-        "INSERT INTO configurations (version, config_json, description, created_at, active) VALUES (?, ?, ?, ?, 1)",
-        (version, config_json, description, now)
+        "INSERT INTO configurations (version, target, config_json, description, created_at, active) VALUES (?, ?, ?, ?, ?, 1)",
+        (version, target, config_json, description, now)
     )
     g.db.commit()
-    return """<script>alert('配置 v{} 已发布');location.href='/config'</script>""".format(version)
+    return """<script>alert('配置 v{} 已发布 (target={})');location.href='/config'</script>""".format(version, target)
 
 # ── 启动入口 ────────────────────────────────────────────
 

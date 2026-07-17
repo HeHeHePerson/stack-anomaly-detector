@@ -500,7 +500,9 @@ public class TemporalGuard {
         String[] mediumRiskFiles = {
             "application.properties", "application.yml", "logback.xml",
             "log4j", "jdbc.properties", "mysql", "postgres", "redis",
-            "rabbitmq", "kafka", "nacos", "consul"
+            "rabbitmq", "kafka", "nacos", "consul",
+            "applicationcontext", "spring-servlet", "mybatis", "mapper",
+            "hibernate", "persistence.xml", "struts"
         };
         for (String kw : mediumRiskFiles) {
             if (lowerPath.contains(kw)) {
@@ -547,44 +549,51 @@ public class TemporalGuard {
             setStatus.invoke(res, 403);
             java.lang.reflect.Method setContentType = res.getClass().getMethod("setContentType", String.class);
             setContentType.invoke(res, "text/html; charset=UTF-8");
-            java.lang.reflect.Method getWriter = res.getClass().getMethod("getWriter");
-            java.io.PrintWriter w = (java.io.PrintWriter) getWriter.invoke(res);
-            w.println("<!DOCTYPE html>");
-            w.println("<html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>访问被阻断</title>");
-            w.println("<style>");
-            w.println("*{margin:0;padding:0;box-sizing:border-box}");
-            w.println("body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0e27;color:#e0e0e0;display:flex;justify-content:center;align-items:center;min-height:100vh}");
-            w.println(".card{background:#111640;border:1px solid #1e2358;border-radius:12px;padding:48px;max-width:520px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.4)}");
-            w.println(".icon{font-size:56px;margin-bottom:16px;color:#ff4757}");
-            w.println("h1{font-size:24px;margin-bottom:12px;color:#ff6b7a}");
-            w.println("p{font-size:14px;color:#8890b5;line-height:1.6;margin-bottom:8px}");
-            w.println(".reason{background:#0d1130;border:1px solid #1e2358;border-radius:6px;padding:12px;margin:16px 0;font-size:12px;color:#ff6b7a;word-break:break-all}");
-            w.println(".footer{margin-top:24px;font-size:11px;color:#4a5080}");
-            w.println("</style></head><body>");
-            w.println("<div class=\"card\">");
-            w.println("<div class=\"icon\">&#128737;</div>");
-            w.println("<h1>" + (isBanned ? "访问受限" : "请求已被阻断") + "</h1>");
-            w.println("<p>" + (isBanned ? "您的浏览器指纹已被临时封禁" : "安全系统检测到异常行为，已阻止本次请求") + "</p>");
-            w.println("<div class=\"reason\">" + escapeHtml(reason) + "</div>");
-            w.println("<p>若您认为这是误判，请联系系统管理员。</p>");
-            w.println("<div class=\"footer\"><span id=\"fp\"></span><br>Security by RASP &mdash; Stack Anomaly Detector</div>");
-            w.println("</div>");
-            w.println("<script>");
-            w.println("(function(){var s=[];");
-            w.println("try{var c=document.createElement('canvas');c.width=280;c.height=60;var x=c.getContext('2d');");
-            w.println("var g=x.createLinearGradient(0,0,280,60);g.addColorStop(0,'#1a73e8');g.addColorStop(0.5,'#ea4335');g.addColorStop(1,'#34a853');x.fillStyle=g;x.fillRect(0,0,280,60);");
-            w.println("x.textBaseline='top';x.font='16px Arial';x.fillStyle='#fff';x.fillText('RASP Security',10,5);");
-            w.println("x.font='12px \"Times New Roman\"';x.fillStyle='rgba(255,255,255,0.85)';x.fillText('Browser Fingerprint',10,28);");
-            w.println("x.font='bold 10px \"Courier New\"';x.fillStyle='rgba(200,200,255,0.9)';x.fillText('Canvas|WebGL|CPU',10,48);");
-            w.println("x.beginPath();x.arc(250,30,15,0,Math.PI*2,false);x.fillStyle='rgba(255,255,0,0.3)';x.fill();");
-            w.println("s.push('cv:'+h(c.toDataURL().substring(300)))}catch(e){s.push('cv:err')}");
-            w.println("try{var w=document.createElement('canvas').getContext('webgl')||document.createElement('canvas').getContext('experimental-webgl');if(w){var d=w.getExtension('WEBGL_debug_renderer_info');if(d)s.push('gl:'+h(w.getParameter(d.UNMASKED_RENDERER_WEBGL)))}}catch(e){s.push('gl:err')}");
-            w.println("s.push('hc:'+(navigator.hardwareConcurrency||'unknown'));");
-            w.println("function h(str){var v=0;for(var i=0;i<str.length;i++){v=((v<<5)-v)+str.charCodeAt(i);v|=0}return(v>>>0).toString(36)}");
-            w.println("var fp=h(s.join('|'));document.cookie='X-RASP-FP='+fp+';path=/;max-age=86400;SameSite=Lax';var e=document.getElementById('fp');if(e)e.textContent='FP: '+fp");
-            w.println("})();</script>");
-            w.println("</body></html>");
-            w.flush();
+
+            StringBuilder html = new StringBuilder(4096);
+            html.append("<!DOCTYPE html>\n");
+            html.append("<html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>访问被阻断</title>");
+            html.append("<style>");
+            html.append("*{margin:0;padding:0;box-sizing:border-box}");
+            html.append("body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0e27;color:#e0e0e0;display:flex;justify-content:center;align-items:center;min-height:100vh}");
+            html.append(".card{background:#111640;border:1px solid #1e2358;border-radius:12px;padding:48px;max-width:520px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.4)}");
+            html.append(".icon{font-size:56px;margin-bottom:16px;color:#ff4757}");
+            html.append("h1{font-size:24px;margin-bottom:12px;color:#ff6b7a}");
+            html.append("p{font-size:14px;color:#8890b5;line-height:1.6;margin-bottom:8px}");
+            html.append(".reason{background:#0d1130;border:1px solid #1e2358;border-radius:6px;padding:12px;margin:16px 0;font-size:12px;color:#ff6b7a;word-break:break-all}");
+            html.append(".footer{margin-top:24px;font-size:11px;color:#4a5080}");
+            html.append("</style></head><body>");
+            html.append("<div class=\"card\">");
+            html.append("<div class=\"icon\">&#128737;</div>");
+            html.append("<h1>").append(isBanned ? "访问受限" : "请求已被阻断").append("</h1>");
+            html.append("<p>").append(isBanned ? "您的浏览器指纹已被临时封禁" : "安全系统检测到异常行为，已阻止本次请求").append("</p>");
+            html.append("<div class=\"reason\">").append(escapeHtml(reason)).append("</div>");
+            html.append("<p>若您认为这是误判，请联系系统管理员。</p>");
+            html.append("<div class=\"footer\"><span id=\"fp\"></span><br>Security by RASP &mdash; Stack Anomaly Detector</div>");
+            html.append("</div>");
+            html.append("<script>");
+            html.append("(function(){var s=[];");
+            html.append("try{var c=document.createElement('canvas');c.width=280;c.height=60;var x=c.getContext('2d');");
+            html.append("var g=x.createLinearGradient(0,0,280,60);g.addColorStop(0,'#1a73e8');g.addColorStop(0.5,'#ea4335');g.addColorStop(1,'#34a853');x.fillStyle=g;x.fillRect(0,0,280,60);");
+            html.append("x.textBaseline='top';x.font='16px Arial';x.fillStyle='#fff';x.fillText('RASP Security',10,5);");
+            html.append("x.font='12px \"Times New Roman\"';x.fillStyle='rgba(255,255,255,0.85)';x.fillText('Browser Fingerprint',10,28);");
+            html.append("x.font='bold 10px \"Courier New\"';x.fillStyle='rgba(200,200,255,0.9)';x.fillText('Canvas|WebGL|CPU',10,48);");
+            html.append("x.beginPath();x.arc(250,30,15,0,Math.PI*2,false);x.fillStyle='rgba(255,255,0,0.3)';x.fill();");
+            html.append("s.push('cv:'+h(c.toDataURL().substring(300)))}catch(e){s.push('cv:err')}");
+            html.append("try{var w=document.createElement('canvas').getContext('webgl')||document.createElement('canvas').getContext('experimental-webgl');if(w){var d=w.getExtension('WEBGL_debug_renderer_info');if(d)s.push('gl:'+h(w.getParameter(d.UNMASKED_RENDERER_WEBGL)))}}catch(e){s.push('gl:err')}");
+            html.append("s.push('hc:'+(navigator.hardwareConcurrency||'unknown'));");
+            html.append("function h(str){var v=0;for(var i=0;i<str.length;i++){v=((v<<5)-v)+str.charCodeAt(i);v|=0}return(v>>>0).toString(36)}");
+            html.append("var fp=h(s.join('|'));document.cookie='X-RASP-FP='+fp+';path=/;max-age=86400;SameSite=Lax';var e=document.getElementById('fp');if(e)e.textContent='FP: '+fp");
+            html.append("})();</script>");
+            html.append("</body></html>");
+
+            byte[] bytes = html.toString().getBytes("UTF-8");
+            java.lang.reflect.Method setContentLength = res.getClass().getMethod("setContentLength", int.class);
+            setContentLength.invoke(res, bytes.length);
+            java.lang.reflect.Method getOutputStream = res.getClass().getMethod("getOutputStream");
+            java.io.OutputStream os = (java.io.OutputStream) getOutputStream.invoke(res);
+            os.write(bytes);
+            os.flush();
         } catch (Exception e) {
             System.err.println("[TemporalGuard] 阻断页面发送失败: " + e.getMessage());
         }

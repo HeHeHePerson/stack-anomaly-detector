@@ -627,12 +627,13 @@ public class BaselineLearningEngine {
         }
         String[] sensitivePaths = {
             "tomcat-users.xml", "web.xml", "server.xml", "context.xml",
-            "manager.xml", "host-manager.xml", ".properties", ".yml", ".yaml",
-            ".xml", ".conf", ".ini", ".key", ".pem", ".crt",
+            "manager.xml", "host-manager.xml", ".key", ".pem", ".crt",
             ".keystore", ".truststore", "passwd", "shadow",
             "etc/", "/etc/", "conf/", "/conf/",
-            "tomcat/", "/tomcat/", "mysql", "postgres", "database",
-            "redis", "rabbitmq"
+            "tomcat/", "/tomcat/",
+            "application.properties", "application.yml",
+            "applicationcontext", "spring-servlet", "mybatis",
+            "hibernate", "persistence.xml"
         };
         for (String sensitive : sensitivePaths) {
             if (lowerPath.contains(sensitive)) {
