@@ -102,6 +102,11 @@ def init_db():
         conn.commit()
     except:
         pass
+    try:
+        conn.execute("ALTER TABLE agents ADD COLUMN config_json TEXT DEFAULT '{}'")
+        conn.commit()
+    except:
+        pass
     conn.close()
 
 # ── 配置参数定义 (友好配置表单) ──────────────────────────
@@ -239,29 +244,33 @@ def teardown_request(exc):
 @app.route("/api/v1/heartbeat", methods=["POST"])
 def heartbeat():
     data = request.get_json(force=True, silent=True) or {}
+    if not data:
+        raw = request.get_data(as_text=True)[:200]
+        print(f"[WARN] 心跳JSON解析失败, 前200字符={raw}", flush=True)
     agent_id = data.get("agent_id", f"{request.remote_addr}:unknown")
     now = now_str()
 
     existing = g.db.execute("SELECT id FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    config_json = json.dumps(data.get("config", {}), ensure_ascii=False) if data.get("config") else "{}"
     if existing:
         g.db.execute("""
             UPDATE agents SET
                 hostname = ?, ip = ?, version = ?, block_mode = ?,
                 learning_done = ?, fingerprint_count = ?, baseline_size = ?,
-                last_heartbeat = ?
+                config_json = ?, last_heartbeat = ?
             WHERE id = ?
         """, (
             data.get("hostname", ""), request.remote_addr, data.get("version", ""),
             data.get("block_mode", "MONITOR"), data.get("learning_done", 0),
             data.get("fingerprint_count", 0), data.get("baseline_size", 0),
-            now, agent_id
+            config_json, now, agent_id
         ))
     else:
         g.db.execute("""
-            INSERT INTO agents (id, hostname, ip, version, block_mode, last_heartbeat, registered_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO agents (id, hostname, ip, version, block_mode, config_json, last_heartbeat, registered_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (agent_id, data.get("hostname", ""), request.remote_addr,
-              data.get("version", ""), data.get("block_mode", "MONITOR"), now, now))
+              data.get("version", ""), data.get("block_mode", "MONITOR"), config_json, now, now))
 
     config_version = data.get("config_version", 0)
     latest = g.db.execute(
@@ -575,6 +584,17 @@ function addAgent() {
         else { alert('失败: '+(d.message||'')); }
     });
 }
+
+function toggleConfig(btn, agentId) {
+    var row = document.getElementById('cfg-'+agentId);
+    if (row.style.display === 'none' || row.style.display === '') {
+        row.style.display = '';
+        btn.textContent = '收起';
+    } else {
+        row.style.display = 'none';
+        btn.textContent = '详情';
+    }
+}
 </script>
 </head>
 <body>
@@ -662,23 +682,52 @@ def agents_page():
             except:
                 pass
         badge = '<span class="badge badge-ok">在线</span>' if online else '<span class="badge badge-warn">离线</span>'
+
+        # 解析 config 生成策略摘要
+        config = {}
+        try:
+            config = json.loads(a["config_json"] or "{}")
+        except:
+            pass
+        block_label = config.get("block.mode", a["block_mode"] or "MONITOR").upper()
+        block_badge = '<span class="badge badge-danger">BLOCK</span>' if block_label == "BLOCK" else '<span class="badge badge-info">MONITOR</span>'
+        learning_ms = config.get("learning.duration", 300000)
+        learning_label = f"{learning_ms // 1000}s" if learning_ms >= 1000 else f"{learning_ms}ms"
+        debug = config.get("debug.log", False)
+        fp_thresh = config.get("fp.ban.threshold", "-")
+
+        # 策略摘要行
+        policy_summary = f'{block_badge} <span style="font-size:11px;color:#8890b5">学习{learning_label}</span>'
+        if debug:
+            policy_summary += ' <span style="font-size:10px;color:#f59e0b">DEBUG</span>'
+
+        config_detail = json.dumps(config, indent=2, ensure_ascii=False) if config else "{}"
+
         rows.append(f'''<tr>
           <td>{a["hostname"] or a["id"][:30]}</td>
           <td class="mono">{a["id"]}</td>
           <td class="mono">{a["ip"]}</td>
           <td><input value="{a["agent_group"] or ''}" onchange="setAgentGroup('{a["id"]}',this)" list="group-suggestions" placeholder="未分组" style="background:#0d1130;border:1px solid #2a3060;color:#b0b8d0;padding:3px 8px;border-radius:3px;font-size:12px;width:80px"></td>
           <td>{a["version"] or "-"}</td>
-          <td>{a["block_mode"]}</td>
+          <td>{policy_summary}</td>
           <td>{badge}</td>
           <td class="mono">{hb[11:19] if hb else "-"}</td>
           <td>{a["alert_count"]}</td>
           <td style="color:#f87171">{a["block_count"]}</td>
-          <td><button class="btn btn-danger" onclick="delAgent('{a["id"]}')">删除</button></td>
+          <td>
+            <button class="btn" onclick="toggleConfig(this,'{a['id']}')" style="font-size:10px;padding:2px 8px">详情</button>
+            <button class="btn btn-danger" onclick="delAgent('{a["id"]}')" style="font-size:10px;padding:2px 8px">删除</button>
+          </td>
+        </tr>
+        <tr id="cfg-{a['id']}" style="display:none">
+          <td colspan="11">
+            <pre style="background:#0d1130;padding:12px;border-radius:6px;font-size:11px;color:#b0b8d0;overflow-x:auto;max-height:200px;margin:4px 0">{config_detail}</pre>
+          </td>
         </tr>''')
 
     content = f"""<div class="card"><h2>节点列表</h2>
     <datalist id="group-suggestions">{''.join(f'<option value="{t}">' for t in TARGET_SUGGESTIONS)}</datalist>
-    <table><tr><th>主机名</th><th>Agent ID</th><th>IP</th><th>分组</th><th>版本</th><th>模式</th><th>状态</th><th>最后心跳</th><th>告警</th><th>阻断</th><th>操作</th></tr>
+    <table><tr><th>主机名</th><th>Agent ID</th><th>IP</th><th>分组</th><th>版本</th><th>策略</th><th>状态</th><th>最后心跳</th><th>告警</th><th>阻断</th><th>操作</th></tr>
     {''.join(rows)}</table></div>
     <div class="card">
       <h2>添加节点</h2>

@@ -637,11 +637,23 @@ public class BaselineLearningEngine {
         };
         for (String sensitive : sensitivePaths) {
             if (lowerPath.contains(sensitive)) {
+                if (isJavaPackagePath(lowerPath, sensitive)) {
+                    continue;
+                }
                 AlertLogger.alarm("[SensitiveFile] 敏感文件访问: " + filePath + " 分数=+30");
                 return 30;
             }
         }
         return 0;
+    }
+
+    private static boolean isJavaPackagePath(String lowerPath, String keyword) {
+        return lowerPath.contains("/com/" + keyword + "/") ||
+               lowerPath.contains("/org/" + keyword + "/") ||
+               lowerPath.contains("/net/" + keyword + "/") ||
+               lowerPath.contains("\\com\\" + keyword + "\\") ||
+               lowerPath.contains("\\org\\" + keyword + "\\") ||
+               lowerPath.contains("\\net\\" + keyword + "\\");
     }
 
     private static int checkDangerousClasses(StackTemporalEngine.StackFingerprint fingerprint) {

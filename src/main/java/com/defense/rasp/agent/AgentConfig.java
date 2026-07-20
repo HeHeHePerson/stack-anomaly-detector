@@ -31,6 +31,17 @@ public class AgentConfig {
     private static boolean verboseInfoEnabled = false;
     private static String managerUrl = null;
     private static String managerToken = null;
+    private static String forwardType = null;
+    private static String forwardSyslogHost = "localhost";
+    private static int forwardSyslogPort = 514;
+    private static String forwardAppName = "";
+    private static String baselineFilePath = null;
+    private static int fpBanThreshold = 10;
+    private static int fpBanWindowSec = 60;
+    private static int fpBanDurationSec = 300;
+    private static int correlationWindowSec = 300;
+    private static int correlationThreshold = 150;
+    private static String rawAgentArgs = null;
 
     public static BlockMode getBlockMode() { return blockMode; }
     public static long getLearningDurationMs() { return learningDurationMs; }
@@ -39,7 +50,36 @@ public class AgentConfig {
     public static String getManagerUrl() { return managerUrl; }
     public static String getManagerToken() { return managerToken; }
 
+    public static String getConfigJson() {
+        StringBuilder sb = new StringBuilder(512);
+        sb.append("{");
+        sb.append("\"block.mode\":\"").append(blockMode.name()).append("\",");
+        sb.append("\"learning.duration\":").append(learningDurationMs).append(",");
+        sb.append("\"debug.log\":").append(debugLogEnabled).append(",");
+        sb.append("\"fp.ban.threshold\":").append(fpBanThreshold).append(",");
+        sb.append("\"fp.ban.window\":").append(fpBanWindowSec).append(",");
+        sb.append("\"fp.ban.duration\":").append(fpBanDurationSec).append(",");
+        if (forwardType != null) {
+            sb.append("\"forward.type\":\"").append(escapeJson(forwardType)).append("\",");
+            sb.append("\"forward.syslog.host\":\"").append(escapeJson(forwardSyslogHost)).append("\",");
+            sb.append("\"forward.syslog.port\":").append(forwardSyslogPort).append(",");
+            sb.append("\"forward.app.name\":\"").append(escapeJson(forwardAppName)).append("\",");
+        }
+        sb.append("\"correlation.window\":").append(correlationWindowSec).append(",");
+        sb.append("\"correlation.threshold\":").append(correlationThreshold);
+        if (baselineFilePath != null) {
+            sb.append(",\"baseline.file\":\"").append(escapeJson(baselineFilePath)).append("\"");
+        }
+        sb.append("}");
+        return sb.toString();
+    }
+
+    private static String escapeJson(String s) {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
     public static void parseArgs(String agentArgs) {
+        rawAgentArgs = agentArgs;
         String defaultPath = getDefaultBaselinePath();
         com.defense.rasp.stackmodel.BaselineLearningEngine.setBaselineFilePath(defaultPath);
 
@@ -116,25 +156,32 @@ public class AgentConfig {
 
         if (params.containsKey("forward.type")) {
             String ft = params.get("forward.type");
+            forwardType = ft;
             String app = params.containsKey("forward.app.name") ? params.get("forward.app.name") : "";
+            forwardAppName = app;
             String host = params.containsKey("forward.syslog.host") ? params.get("forward.syslog.host") : "localhost";
+            forwardSyslogHost = host;
             int port = 514;
             if (params.containsKey("forward.syslog.port")) {
                 try { port = Integer.parseInt(params.get("forward.syslog.port")); } catch (NumberFormatException ignored) {}
             }
+            forwardSyslogPort = port;
             com.defense.rasp.forward.ForwardManager.init(ft, app, host, port);
         }
 
         if (params.containsKey("baseline.file")) {
             String path = params.get("baseline.file");
             if (path != null && !path.isEmpty() && !"none".equalsIgnoreCase(path) && !"false".equalsIgnoreCase(path)) {
+                baselineFilePath = path;
                 com.defense.rasp.stackmodel.BaselineLearningEngine.setBaselineFilePath(path);
                 System.out.println("[StackAnomalyDetector] 基线文件路径: " + path);
             } else {
+                baselineFilePath = null;
                 com.defense.rasp.stackmodel.BaselineLearningEngine.setBaselineFilePath(null);
                 System.out.println("[StackAnomalyDetector] 基线持久化已禁用");
             }
         } else {
+            baselineFilePath = defaultPath;
             System.out.println("[StackAnomalyDetector] 基线文件路径(默认): " + defaultPath);
         }
 
@@ -142,6 +189,7 @@ public class AgentConfig {
             try {
                 int w = Integer.parseInt(params.get("correlation.window"));
                 if (w > 0) {
+                    correlationWindowSec = w;
                     com.defense.rasp.stackmodel.AttackCorrelationEngine.setWindowSeconds(w);
                     System.out.println("[StackAnomalyDetector] 跨请求关联窗口: " + w + "s");
                 }
@@ -152,6 +200,7 @@ public class AgentConfig {
             try {
                 int t = Integer.parseInt(params.get("correlation.threshold"));
                 if (t > 0) {
+                    correlationThreshold = t;
                     com.defense.rasp.stackmodel.AttackCorrelationEngine.setScoreThreshold(t);
                     System.out.println("[StackAnomalyDetector] 跨请求关联阈值: " + t);
                 }
@@ -162,6 +211,7 @@ public class AgentConfig {
             try {
                 int t = Integer.parseInt(params.get("fp.ban.threshold"));
                 if (t > 0) {
+                    fpBanThreshold = t;
                     com.defense.rasp.stackmodel.FingerprintBanEngine.setAttackThreshold(t);
                     System.out.println("[StackAnomalyDetector] 指纹封禁阈值: " + t + " 次");
                 }
@@ -172,6 +222,7 @@ public class AgentConfig {
             try {
                 int w = Integer.parseInt(params.get("fp.ban.window"));
                 if (w > 0) {
+                    fpBanWindowSec = w;
                     com.defense.rasp.stackmodel.FingerprintBanEngine.setAttackWindowMs(w * 1000L);
                     System.out.println("[StackAnomalyDetector] 指纹攻击窗口: " + w + "s");
                 }
@@ -182,6 +233,7 @@ public class AgentConfig {
             try {
                 int d = Integer.parseInt(params.get("fp.ban.duration"));
                 if (d > 0) {
+                    fpBanDurationSec = d;
                     com.defense.rasp.stackmodel.FingerprintBanEngine.setBanDurationMs(d * 1000L);
                     System.out.println("[StackAnomalyDetector] 指纹封禁时长: " + d + "s");
                 }

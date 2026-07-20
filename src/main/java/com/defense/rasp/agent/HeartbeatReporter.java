@@ -38,18 +38,22 @@ public class HeartbeatReporter {
     private static void sendHeartbeat() {
         if (managerUrl == null || agentId == null) return;
         try {
+            String cfg = AgentConfig.getConfigJson();
+            String safeAgentId = escapeJson(agentId.replace('\\', '/'));
+            String safeHostname = escapeJson(hostname);
             String json = String.format(
                 "{\"agent_id\":\"%s\",\"hostname\":\"%s\",\"version\":\"1.3.0\"," +
                 "\"block_mode\":\"%s\",\"learning_done\":%b," +
                 "\"fingerprint_count\":%d,\"alert_count\":%d,\"block_count\":%d," +
-                "\"baseline_size\":%d}",
-                agentId, hostname,
+                "\"baseline_size\":%d,\"config\":%s}",
+                safeAgentId, safeHostname,
                 AgentConfig.getBlockMode().name(),
                 com.defense.rasp.stackmodel.BaselineLearningEngine.isLearningComplete(),
                 com.defense.rasp.stackmodel.FingerprintBanEngine.getBannedFingerprints().size(),
                 AlertLogger.getAlarmCount(),
                 AlertLogger.getBlockCount(),
-                com.defense.rasp.stackmodel.BaselineLearningEngine.getBaselineFileSize()
+                com.defense.rasp.stackmodel.BaselineLearningEngine.getBaselineFileSize(),
+                cfg
             );
 
             HttpURLConnection conn = (HttpURLConnection) new URL(managerUrl + "/api/v1/heartbeat").openConnection();
@@ -74,5 +78,29 @@ public class HeartbeatReporter {
         } catch (Exception e) {
             AlertLogger.debug("[Heartbeat] 心跳失败: " + e.getMessage());
         }
+    }
+
+    private static String escapeJson(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length() + 16);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '\\': sb.append("\\\\"); break;
+                case '"':  sb.append("\\\""); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                case '\b': sb.append("\\b"); break;
+                case '\f': sb.append("\\f"); break;
+                default:
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+            }
+        }
+        return sb.toString();
     }
 }

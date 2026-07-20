@@ -44,7 +44,11 @@ public class TemporalGuard {
         for (int i = 1; i < stack.length; i++) {
             String className = stack[i].getClassName();
             if (className.equals("org.apache.catalina.servlets.DefaultServlet") ||
-                className.startsWith("org.apache.jasper.servlet.JspServlet")) {
+                className.startsWith("org.apache.jasper.servlet.JspServlet") ||
+                className.startsWith("org.apache.catalina.loader.") ||
+                className.startsWith("org.apache.jasper.compiler.") ||
+                className.startsWith("org.apache.jasper.runtime.") ||
+                className.startsWith("java.util.ResourceBundle")) {
                 return true;
             }
         }
@@ -497,6 +501,7 @@ public class TemporalGuard {
         }
 
         // 中风险：配置和数据库相关
+        // 排除标准 Java 库包路径 (com/mysql, org/postgresql 等)，避免资源文件误报
         String[] mediumRiskFiles = {
             "application.properties", "application.yml", "logback.xml",
             "log4j", "jdbc.properties", "mysql", "postgres", "redis",
@@ -506,6 +511,9 @@ public class TemporalGuard {
         };
         for (String kw : mediumRiskFiles) {
             if (lowerPath.contains(kw)) {
+                if (isJavaPackagePath(lowerPath, kw)) {
+                    continue;
+                }
                 score += 30;
                 break;
             }
@@ -521,6 +529,15 @@ public class TemporalGuard {
         }
 
         return score;
+    }
+
+    private static boolean isJavaPackagePath(String lowerPath, String keyword) {
+        return lowerPath.contains("/com/" + keyword + "/") ||
+               lowerPath.contains("/org/" + keyword + "/") ||
+               lowerPath.contains("/net/" + keyword + "/") ||
+               lowerPath.contains("\\com\\" + keyword + "\\") ||
+               lowerPath.contains("\\org\\" + keyword + "\\") ||
+               lowerPath.contains("\\net\\" + keyword + "\\");
     }
 
     private static boolean isSensitiveDirectory(String dirPath) {
