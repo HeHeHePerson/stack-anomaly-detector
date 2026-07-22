@@ -14,7 +14,9 @@ public class AgentMain {
     private static final String[] TARGET_CLASSES = {
         // Servlet - Web 请求入口 (Tomcat 加载，可安全 Hook)
         "javax.servlet.http.HttpServlet",
-        "javax.servlet.ServletContext"
+        "javax.servlet.ServletContext",
+        // Spring - 请求体反序列化入口 (WebappClassLoader 加载，安全)
+        "org.springframework.web.servlet.mvc.method.annotation.AbstractMessageConverterMethodArgumentResolver"
     };
 
     /**

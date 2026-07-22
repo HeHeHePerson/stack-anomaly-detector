@@ -143,6 +143,12 @@ public class TemporalGuard {
         int anomalyScore = BaselineLearningEngine.detectAnomaly(stack, filePath);
         anomalyScore += analyzeFileSensitivity(filePath);
 
+        if (IN_DESERIALIZATION.get() != null && IN_DESERIALIZATION.get()) {
+            anomalyScore += 25;
+            AlertLogger.alarm("[DeserializationCtx] 反序列化上下文中的文件读取: "
+                + filePath + " 分数=+25");
+        }
+
         if (anomalyScore >= HIGH_RISK_THRESHOLD) {
             block("高风险时空异常: 文件=" + filePath, anomalyScore, stack);
         } else if (anomalyScore >= MEDIUM_RISK_THRESHOLD) {
@@ -231,6 +237,22 @@ public class TemporalGuard {
     private static final ThreadLocal<Boolean> IS_BANNED = new ThreadLocal<>();
     private static final ThreadLocal<String> FP_FINGERPRINT = new ThreadLocal<>();
     private static final ThreadLocal<Boolean> AFTER_RAN = new ThreadLocal<>();
+    private static final ThreadLocal<Boolean> IN_DESERIALIZATION = new ThreadLocal<>();
+
+    public static void beforeDeserialization() {
+        IN_DESERIALIZATION.set(true);
+        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+        recordThreadEvent("spring.messageconverter.read", StackTemporalEngine.CallEvent.EventType.ENTER);
+        BaselineLearningEngine.learnNormalStack(stack, false);
+    }
+
+    public static void afterDeserialization() {
+        IN_DESERIALIZATION.remove();
+    }
+
+    public static String getCurrentUri() {
+        return PENDING_REQUEST_URI.get();
+    }
 
     public static void beforeService(Object req, Object res) {
         AlertLogger.debug("[TemporalGuard] beforeService 被调用");
@@ -374,6 +396,26 @@ public class TemporalGuard {
         }
     }
 
+    public static void onSuspiciousOutboundConnection(String host, int port) {
+        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+        recordThreadEvent("java.net.Socket.connect", StackTemporalEngine.CallEvent.EventType.ENTER);
+        BaselineLearningEngine.learnNormalStack(stack, false);
+        if (BaselineLearningEngine.isLearningPhase()) return;
+
+        int score = 30;
+        if (port == 389 || port == 636 || port == 3268 || port == 3269) score += 20;
+        if (port == 1099 || port == 1098 || port == 1389 || port == 1387 || port == 2000) score += 20;
+
+        score += BaselineLearningEngine.detectAnomaly(stack, host + ":" + port);
+
+        if (score >= HIGH_RISK_THRESHOLD) {
+            block("高风险外连: " + host + ":" + port, score, stack);
+        } else if (score >= MEDIUM_RISK_THRESHOLD) {
+            alarm("中风险外连: " + host + ":" + port, score, stack);
+        }
+        checkCorrelation(score);
+    }
+
     private static boolean isSensitiveReflectCall(String className, String methodName) {
         if (className.startsWith("java.io") || className.startsWith("java.nio")) return true;
         if (className.startsWith("java.lang.ClassLoader") || className.startsWith("sun.misc.Launcher")) return true;
@@ -402,6 +444,12 @@ public class TemporalGuard {
         }
         
         int anomalyScore = BaselineLearningEngine.detectAnomaly(stack, null) + analyzeCommand(command);
+
+        if (IN_DESERIALIZATION.get() != null && IN_DESERIALIZATION.get()) {
+            anomalyScore += 25;
+            AlertLogger.alarm("[DeserializationCtx] 反序列化上下文中的命令执行: "
+                + command + " 分数=+25");
+        }
 
         if (anomalyScore >= HIGH_RISK_THRESHOLD) {
             block("高风险命令执行: 命令=" + command, anomalyScore, stack);

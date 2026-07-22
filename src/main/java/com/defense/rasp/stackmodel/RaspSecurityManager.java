@@ -84,6 +84,36 @@ public class RaspSecurityManager extends java.lang.SecurityManager {
         }
     }
 
+    @Override
+    public void checkConnect(String host, int port) {
+        if (IN_DETECTION.get()) return;
+        if (isKnownServicePort(port)) return;
+        String uri = TemporalGuard.getCurrentUri();
+        if (uri == null) return;
+        try {
+            IN_DETECTION.set(true);
+            TemporalGuard.onSuspiciousOutboundConnection(host, port);
+        } catch (SecurityException e) {
+            throw e;
+        } catch (Throwable e) {
+        } finally {
+            IN_DETECTION.remove();
+        }
+    }
+
+    private static boolean isKnownServicePort(int port) {
+        switch (port) {
+            case 3306:  case 5432:  case 6379:  case 11211:
+            case 9200:  case 9300:  case 27017: case 5672:
+            case 9092:  case 80:    case 443:   case 8080:
+            case 8443:  case 53:    case 25:    case 587:
+            case 1433:  case 1521:  case 2049:
+                return true;
+            default:
+                return false;
+        }
+    }
+
     /**
      * 放行所有包访问检查，避免干扰 Tomcat WebappClassLoader 类加载
      * 此方法由 JVM 在类加载时直接调用，不经过 checkPermission

@@ -39,6 +39,16 @@ public class TemporalStackTransformer implements ClassFileTransformer {
             }
         }
 
+        if ("org/springframework/web/servlet/mvc/method/annotation/AbstractMessageConverterMethodArgumentResolver".equals(className)) {
+            AlertLogger.debug("[TemporalStackTransformer] 插桩 Spring MessageConverter");
+            try {
+                return hookMessageConverter(classfileBuffer);
+            } catch (Throwable t) {
+                System.err.println("[TemporalStackTransformer] MessageConverter 插桩失败: " + t.getMessage());
+                return null;
+            }
+        }
+
         return null;
     }
 
@@ -124,6 +134,40 @@ public class TemporalStackTransformer implements ClassFileTransformer {
                             mv.visitVarInsn(Opcodes.ALOAD, 1);
                             mv.visitMethodInsn(Opcodes.INVOKESTATIC,
                                 GUARD_CLASS, "onServletContextAccess", "(Ljava/lang/String;)V", false);
+                        }
+                    };
+                }
+                return mv;
+            }
+        };
+        cr.accept(cv, ClassReader.EXPAND_FRAMES);
+        return cw.toByteArray();
+    }
+
+    private byte[] hookMessageConverter(byte[] classfileBuffer) {
+        ClassReader cr = new ClassReader(classfileBuffer);
+        ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
+        String targetDesc = "(Lorg/springframework/http/HttpInputMessage;Lorg/springframework/core/MethodParameter;Ljava/lang/reflect/Type;)Ljava/lang/Object;";
+        ClassVisitor cv = new ClassVisitor(Opcodes.ASM9, cw) {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String descriptor,
+                                              String signature, String[] exceptions) {
+                MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                if ("readWithMessageConverters".equals(name) && descriptor.equals(targetDesc)) {
+                    return new MethodVisitor(Opcodes.ASM9, mv) {
+                        @Override
+                        public void visitCode() {
+                            super.visitCode();
+                            mv.visitMethodInsn(Opcodes.INVOKESTATIC,
+                                GUARD_CLASS, "beforeDeserialization", "()V", false);
+                        }
+                        @Override
+                        public void visitInsn(int opcode) {
+                            if (opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN) {
+                                mv.visitMethodInsn(Opcodes.INVOKESTATIC,
+                                    GUARD_CLASS, "afterDeserialization", "()V", false);
+                            }
+                            super.visitInsn(opcode);
                         }
                     };
                 }
